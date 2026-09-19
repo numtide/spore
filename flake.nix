@@ -46,15 +46,18 @@
       packages =
         lib.recursiveUpdate
           (perPlatform (p: {
-            inherit (p.value) kernel initrd disk;
+            inherit (p.value)
+              kernel
+              initrd
+              disk
+              target
+              ;
             kernel-config = p.value.kernelConfig;
-            initrd-rust = p.value.rustInitrd;
-            disk-rust = p.value.rustDisk;
-            disk-uki = p.value.ukiDisk;
-            disk-debug = p.value.debugDisk;
             initrd-debug = p.value.debugInitrd;
+            disk-debug = p.value.debugDisk;
+            disk-linux = p.value.linuxDisk;
+            disk-uki = p.value.ukiDisk;
             inherit (p.value.ukiDisk) uki;
-            inherit (p.value) target;
           }))
           {
             x86_64-linux = {
@@ -67,55 +70,44 @@
 
       checks = perPlatform (
         p:
-        lib.mapAttrs' (n: lib.nameValuePair "boot-${n}") (
-          import ./common/test.nix (
+        let
+          lanes =
+            args:
+            import ./common/test.nix (
+              {
+                inherit (p) pkgs;
+                platform = p.dir;
+                inherit (p.value) disk;
+              }
+              // p.value.test
+              // args
+            );
+          # the disk variant that is not the platform's disk gets the good
+          # lane per firmware
+          other = lib.findFirst (v: v.disk.drvPath != p.value.disk.drvPath) null [
             {
-              inherit (p) pkgs;
-              platform = p.dir;
-              inherit (p.value) disk;
+              name = "linux";
+              disk = p.value.linuxDisk;
             }
-            // p.value.test
-          )
-        )
-        // lib.mapAttrs' (n: lib.nameValuePair "boot-rust-${n}") (
-          import ./common/test.nix (
             {
-              inherit (p) pkgs;
-              platform = "${p.dir}-rust";
-              disk = p.value.rustDisk;
-              rust = true;
+              name = "uki";
+              disk = p.value.ukiDisk;
             }
-            // p.value.test
-          )
-        )
-        # the rescue lane per firmware, on the disk with the shell
+          ];
+        in
+        lib.mapAttrs' (n: lib.nameValuePair "boot-${n}") (lanes { })
         // lib.mapAttrs' (n: lib.nameValuePair "boot-debug-${n}") (
-          lib.filterAttrs (n: _: lib.hasSuffix "-rescue" n) (
-            import ./common/test.nix (
-              {
-                inherit (p) pkgs;
-                platform = "${p.dir}-debug";
-                disk = p.value.debugDisk;
-                rust = true;
-                shell = true;
-              }
-              // p.value.test
-            )
-          )
+          lib.filterAttrs (n: _: lib.hasSuffix "-rescue" n) (lanes {
+            platform = "${p.dir}-debug";
+            disk = p.value.debugDisk;
+            shell = true;
+          })
         )
-        # the good lane per firmware: every boot goes through the UKI
-        // lib.mapAttrs' (n: lib.nameValuePair "boot-uki-${n}") (
-          lib.getAttrs (lib.attrNames p.value.test.firmwares) (
-            import ./common/test.nix (
-              {
-                inherit (p) pkgs;
-                platform = "${p.dir}-uki";
-                disk = p.value.ukiDisk;
-                rust = true;
-              }
-              // p.value.test
-            )
-          )
+        // lib.mapAttrs' (n: lib.nameValuePair "boot-${other.name}-${n}") (
+          lib.getAttrs (lib.attrNames p.value.test.firmwares) (lanes {
+            platform = "${p.dir}-${other.name}";
+            inherit (other) disk;
+          })
         )
         // {
           kernel-config = p.pkgs.runCommand "${p.dir}-kernel-config-in-sync" { } ''

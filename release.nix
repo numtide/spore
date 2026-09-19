@@ -13,7 +13,7 @@ let
       stem = "spore-${version}-${p.name}-${p.arch}";
     in
     ''
-      zstd -q -19 -T0 ${p.value.releaseDisk}/disk.img -o ${stem}.img.zst
+      zstd -q -19 -T0 ${p.value.disk}/disk.img -o ${stem}.img.zst
       zstd -q -19 -T0 ${p.value.debugDisk}/disk.img -o ${stem}-debug.img.zst
       cp ${p.value.ukiDisk.uki}/spore.efi ${stem}.efi
       cp ${p.binary}/bin/spore spore-${version}-${p.arch}-linux

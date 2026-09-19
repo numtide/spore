@@ -7,8 +7,6 @@
   console,
   features ? [ ],
   timeout ? 180,
-  # the Rust /init: the repart lane and boot counting
-  rust ? false,
   # the initrd has busybox: an emergency or rescue drops to a shell
   shell ? false,
 }:
@@ -211,24 +209,7 @@ let
         cp *.log $out/
       '';
 
-  # The shell /init writes a /target Limine entry: the second boot must
-  # start it directly.
-  shellLane =
-    name: firmware:
-    run name firmware "userdata.json" ''
-      boot first.log
-      boot second.log
-      show first.log
-      need '^spore: kexec into ${target}' first.log
-      need SPORE-TARGET-OK first.log
-      need SPORE-TARGET-OK second.log
-      if grep -q '^spore: ' second.log; then
-        echo "second boot ran the bootstrap again" >&2
-        exit 1
-      fi
-    '';
-
-  # The Rust /init starts every boot. The first boot provisions and kexecs
+  # The bootstrap starts every boot. The first boot provisions and kexecs
   # into the target, which marks the boot good. The second boot takes a try
   # and kexecs the target from the ESP without the network; the good mark
   # gives the try back.
@@ -319,12 +300,9 @@ let
     need '^spore: kexec into the target on the ESP' third.log
   '';
 in
-if rust then
-  lib.mapAttrs goodLane firmwares
-  // lib.mapAttrs' (n: f: lib.nameValuePair "${n}-panic" (panicLane n f)) firmwares
-  // lib.mapAttrs' (n: f: lib.nameValuePair "${n}-rescue" (rescueLane n f)) firmwares
-  // {
-    repart = repartLane;
-  }
-else
-  lib.mapAttrs shellLane firmwares
+lib.mapAttrs goodLane firmwares
+// lib.mapAttrs' (n: f: lib.nameValuePair "${n}-panic" (panicLane n f)) firmwares
+// lib.mapAttrs' (n: f: lib.nameValuePair "${n}-rescue" (rescueLane n f)) firmwares
+// {
+  repart = repartLane;
+}

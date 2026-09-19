@@ -1,6 +1,9 @@
 # hcloud cax types boot UEFI only (EDK II with ACPI). Upload disk.img like
 # the x86_64 image, from a cax helper server.
 { pkgs, common }:
+let
+  userdataUrl = "http://169.254.169.254/hetzner/v1/userdata";
+in
 rec {
   kernelConfig = common.kernelConfig {
     name = "hcloud-aarch64";
@@ -16,29 +19,22 @@ rec {
     configfile = ./kernel.config;
     zboot = true;
   };
-  initrd = common.shellInitrd { userdata = ./userdata.sh; };
-  disk = common.disk {
+  initrd = common.initrd { inherit userdataUrl; };
+  debugInitrd = common.initrd {
+    inherit userdataUrl;
+    debug = true;
+  };
+  linuxDisk = common.disk {
     inherit kernel initrd;
     cmdline = "quiet";
   };
-  rustInitrd = common.rustInitrd {
-    userdataUrl = "http://169.254.169.254/hetzner/v1/userdata";
-  };
-  rustDisk = common.disk {
-    inherit kernel;
-    initrd = rustInitrd;
-    cmdline = "quiet";
-  };
-  ukiDisk = rustDisk.override {
+  ukiDisk = linuxDisk.override {
     uki = true;
     ukiKernel = zbootKernel;
   };
-  debugInitrd = common.rustInitrd {
-    userdataUrl = "http://169.254.169.254/hetzner/v1/userdata";
-    debug = true;
-  };
-  releaseDisk = ukiDisk;
-  debugDisk = releaseDisk.override { initrd = debugInitrd; };
+  # the UKI with zboot boots as fast and puts 8.6 MB on the ESP, not 19 MB
+  disk = ukiDisk;
+  debugDisk = disk.override { initrd = debugInitrd; };
   target =
     (pkgs.nixos {
       imports = [ ../../targets/hcloud ];

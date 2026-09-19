@@ -17,9 +17,9 @@ spore is under the MIT license. See `LICENSE`.
 The outputs are per platform. For hcloud on x86_64:
 
 ```sh
-nix build .#hcloud-disk-rust      # result/disk.img: the release disk, raw GPT, 131 MiB
+nix build .#hcloud-disk           # result/disk.img: the release disk, raw GPT, 131 MiB
 nix build .#hcloud-disk-debug     # the same disk with the rescue shell
-nix build .#hcloud-initrd-rust    # result/initrd: the Rust /init and a static mke2fs
+nix build .#hcloud-initrd         # result/initrd: spore as /init and a static mke2fs
 nix build .#hcloud-kernel         # result/bzImage: KVM guest kernel, no modules
 nix build .#hcloud-kernel-config  # the .config that the fragments resolve to
 nix build .#hcloud-uki            # result/spore.efi: kernel, initrd and cmdline in one PE
@@ -34,10 +34,10 @@ The build uses no VM. The x86_64 boot tests need the `kvm` system feature.
 For hcloud on aarch64, build on an aarch64-linux builder:
 
 ```sh
-nix build .#packages.aarch64-linux.hcloud-disk-uki    # the release disk: a UKI with a zboot kernel
+nix build .#packages.aarch64-linux.hcloud-disk        # the release disk: a UKI with a zboot kernel
 nix build .#packages.aarch64-linux.hcloud-disk-debug  # the same disk with the rescue shell
 nix build .#packages.aarch64-linux.hcloud-target
-nix build .#checks.aarch64-linux.hcloud-boot-rust-uefi
+nix build .#checks.aarch64-linux.hcloud-boot-uefi
 ```
 
 The aarch64 tests use TCG, because hcloud cax servers have no `/dev/kvm`.
@@ -53,11 +53,10 @@ A Debian cax41 with `nix-bin` from apt works as a temporary builder:
 
 | File                 | Content |
 | -------------------- | ------- |
-| `spore/`             | The Rust /init: one static musl binary |
+| `spore/`             | The bootstrap: one static musl binary, run as /init |
 | `spore.nix`          | Builds it, with a smaller bundled SQLite |
-| `default.nix`        | `rustInitrd` (the Rust /init) and `shellInitrd` (the busybox sh /init) |
+| `default.nix`        | `initrd`: spore as /init, with busybox in the debug variant |
 | `initrd.nix`         | The initrd builder: `init`, static `tools`, extra `files` |
-| `init`, `dhcp-script` | The busybox sh /init and its udhcpc hook |
 | `rescue-busybox.nix` | The busybox of the debug initrd: only the applets of the rescue shell |
 | `kernel-base.nix`    | The base kernel config fragment |
 | `kernel-config.nix`  | Resolves a .config from the fragments |
@@ -74,8 +73,7 @@ flake exports it as `packages.<arch>-linux.<platform>-*` and
 | --------------- | ------- |
 | `kernel.nix`    | The platform kernel config fragment |
 | `kernel.config` | The resolved .config. The `kernel-config` check keeps it in sync. |
-| `userdata.sh`   | `userdata_fetch` for the shell /init |
-| `default.nix`   | The kernel, initrds, disks, release disk, target and test settings |
+| `default.nix`   | The kernel, the initrds, the disks (`disk` is the release disk), the target and the test settings |
 
 `targets/boot-good.nix` is the NixOS module that marks a boot good for the
 boot counter. `targets/boot-good.sh` is its script. `targets/hcloud/` is the
@@ -92,7 +90,7 @@ Then copy `result` to `platforms/<platform>-<arch>/kernel.config`.
 
 - Kernel: KVM guest, virtio-blk, virtio-scsi, virtio-net, softdog. No modules.
 - Firmware: SeaBIOS on cx types, UEFI on cpx types. The tests boot both.
-- Release disk: `hcloud-disk-rust`. Limine starts the kernel with its linux
+- Release disk: `hcloud-disk`, the same as `hcloud-disk-linux`. Limine starts the kernel with its linux
   protocol on both firmwares.
 - Console: VNC. VGA text on SeaBIOS, the EFI framebuffer on UEFI.
 
@@ -101,7 +99,7 @@ Then copy `result` to `platforms/<platform>-<arch>/kernel.config`.
 - Kernel: arm64 `defconfig` plus `virt.config`, with ACPI, PSCI, virtio-scsi
   and virtio-net. The bootstrap loads no modules.
 - Firmware: UEFI only (EDK II). Limine starts from `EFI/BOOT/BOOTAA64.EFI`.
-- Release disk: `hcloud-disk-uki`. Limine chainloads a UKI with a zboot
+- Release disk: `hcloud-disk`, the same as `hcloud-disk-uki`. Limine chainloads a UKI with a zboot
   kernel.
 - Console: VNC shows the EFI framebuffer. The serial console is `ttyS0`
   (PCI 16550) on hcloud and `ttyAMA0` (PL011) in the QEMU test.
@@ -131,9 +129,8 @@ starts only `/bootstrap`. On a UKI disk, `/bootstrap` is an `efi` entry for
 entry, because Limine hides `efi` entries on BIOS and starts the first entry
 it can boot.
 
-The Rust /init keeps the target in the `target/` directory of the ESP:
-`kernel`, `initrd`, `cmdline` and the boot counter `tries`. The shell /init
-writes a `/target` Limine entry above `/bootstrap` instead.
+The bootstrap keeps the target in the `target/` directory of the ESP:
+`kernel`, `initrd`, `cmdline` and the boot counter `tries`.
 
 ## User-data
 
@@ -163,9 +160,9 @@ keys.
 | `system`              | required      | A store path, or a map from `<arch>-linux` to a store path, so one user-data serves every arch |
 | `substituters`        | required      | Binary caches, asked in order |
 | `trusted-public-keys` | required      | The keys that must sign the closure |
-| `boot-tries`          | `3`           | Boots of the system without a good mark, 1 to 9 (Rust /init only) |
-| `fallback`            | `"provision"` | With no tries left: `"provision"` again, or `"rescue"`: stay in the bootstrap, the disk stays as it is (Rust /init only) |
-| `layout`              | none          | The partition layout; see "Partition layout" (Rust /init only) |
+| `boot-tries`          | `3`           | Boots of the system without a good mark, 1 to 9 |
+| `fallback`            | `"provision"` | With no tries left: `"provision"` again, or `"rescue"`: stay in the bootstrap, the disk stays as it is |
+| `layout`              | none          | The partition layout; see "Partition layout" |
 
 An unknown key inside `spore` is an error, so a typo does not pass as a
 default.
@@ -228,13 +225,9 @@ shell, and `"fallback": "rescue"` starts the rescue shell. The release disk
 has no shell: a failure retries every 10 s, and a rescue waits in the
 bootstrap.
 
-The shell /init (`hcloud-disk`, `hcloud-initrd`) is the first version of the
-bootstrap: busybox sh with static nix, kexec, sfdisk, mke2fs, mtools and
-jq. It has a fixed layout and no boot counting. The tests keep it working.
-
 ## Boot counting
 
-The Rust /init counts the boots of the target. After `boot-tries` boots
+The bootstrap counts the boots of the target. After `boot-tries` boots
 without a good mark, the machine falls back to the bootstrap.
 
 Limine starts `/bootstrap` on every boot. The bootstrap reads `target/tries`
@@ -286,13 +279,12 @@ a hang waits for a reset from outside.
 
 | Check | Boots |
 | ----- | ----- |
-| `boot-rust-*` | 1: provision; the target marks the boot good, `tries` is "3 3". 2: the bootstrap kexecs the target from the ESP without the network; `tries` is "3 3" again. |
-| `boot-rust-*-panic` | `boot-tries` 2, the target panics (sysrq `c`). `tries` goes "1 2", then "0 2". Boot 3 provisions the same user-data again (0 paths fetched): "1 2". |
-| `boot-rust-*-rescue` | `boot-tries` 1, `"fallback": "rescue"`, the target powers off without a good mark. Boot 2 stays in the bootstrap and does no kexec; `tries` stays "0 1". |
+| `boot-*` | 1: provision; the target marks the boot good, `tries` is "3 3". 2: the bootstrap kexecs the target from the ESP without the network; `tries` is "3 3" again. |
+| `boot-*-panic` | `boot-tries` 2, the target panics (sysrq `c`). `tries` goes "1 2", then "0 2". Boot 3 provisions the same user-data again (0 paths fetched): "1 2". |
+| `boot-*-rescue` | `boot-tries` 1, `"fallback": "rescue"`, the target powers off without a good mark. Boot 2 stays in the bootstrap and does no kexec; `tries` stays "0 1". |
 | `boot-debug-*-rescue` | The same on the debug disk: boot 2 starts the rescue shell. |
-| `boot-uki-*` | The good lane on the UKI disk. |
-| `boot-rust-repart` | Removes `target/tries` after boot 1, so boot 2 provisions again; boot 3 kexecs from the ESP. |
-| `boot-*` | The shell /init. |
+| `boot-uki-*`, `boot-linux-*` | The good lane on the disk variant that is not the release disk: the UKI disk on x86_64, the linux entry disk on aarch64. |
+| `boot-repart` | Removes `target/tries` after boot 1, so boot 2 provisions again; boot 3 kexecs from the ESP. |
 
 The test targets run the same `boot-good.sh` as the NixOS module, with
 busybox and a static mtools.
@@ -461,7 +453,7 @@ no growpart or repart. It imports `targets/boot-good.nix`.
 - **arm64 kexec needs `SUSPEND`.** CPU hotplug parks the secondary CPUs.
 - **hcloud leases a /32.** The DHCP client adds a host route to the
   gateway.
-- **The initrd is small.** The Rust /init has the Mozilla CA roots built in
+- **The initrd is small.** spore has the Mozilla CA roots built in
   (`webpki-roots`), so the initrd has no CA bundle. The bundled SQLite has
   FTS3, FTS5, RTREE, DBSTAT, STAT4, JSON, column metadata and
   load_extension off: `db.rs` only inserts rows. `idna_adapter` 1.0.0 is the
@@ -504,7 +496,6 @@ Method:
 | Kernel | 7.70 MB bzImage | 17.03 MB Image, 6.45 MB zboot |
 | Initrd, release | 1.82 MB | 1.77 MB |
 | Initrd, debug | 2.02 MB | 1.98 MB |
-| Initrd, shell /init | 17.66 MB | 16.59 MB |
 | UKI | 9.69 MB | 8.38 MB (zboot kernel) |
 | `spore` binary | 3.15 MB | 2.77 MB |
 | Release disk, raw | 131 MiB | 131 MiB |
@@ -590,8 +581,8 @@ cx23, from the same cache, 5 runs each. The time is the one that
 
 ## Limits
 
-- The Rust /init takes a repart layout, but ext4 only, and no encryption or
-  RAID. The shell /init has a fixed layout and no boot counting.
+- The bootstrap takes a repart layout, but ext4 only, and no encryption or
+  RAID.
 - Boot counting runs the bootstrap on every warm boot, which adds a kexec.
 - The aarch64 kernel has no softdog yet, so a hang there waits for a reset
   from outside. Its kernel.config needs a native aarch64 build.
