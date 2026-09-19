@@ -1,0 +1,42 @@
+[package]
+name = "spore"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+base64 = "0.22"
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+fatfs = { version = "0.3", default-features = false, features = ["std", "alloc"] }
+# 1.0.0 is the ASCII-only IDNA backend of the url crate: no ICU tables
+# (120 KB). A substituter host name must be ASCII (or punycode).
+idna_adapter = "=1.0.0"
+libc = "0.2"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ring = "0.17"
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
+xz2 = { version = "0.1", features = ["static"] }
+zstd = { version = "0.13", default-features = false }
+
+[dev-dependencies]
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# the hot path of the pull. With the ring SHA-256, this took a 410 MiB pull on
+# hcloud cx23 from 6.4 s to 1.0 s of CPU (4.3 s to 1.05 s wall).
+[profile.release.package.zstd-sys]
+opt-level = 3
+
+[profile.release.package.lzma-sys]
+opt-level = 3
+
+[profile.release.package.ring]
+opt-level = 3

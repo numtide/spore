@@ -1,0 +1,107 @@
+#!/bin/sh
+# PID 1 of the bootstrap. Reads what to run from the cloud user-data, puts
+# it on the disk, makes it the default boot entry, and kexecs into it.
+
+export PATH=/bin HOME=/tmp NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mount -t tmpfs tmpfs /run
+mount -t tmpfs tmpfs /tmp
+exec </dev/console >/dev/console 2>&1
+
+log() { echo "spore: $*"; }
+t0=$(cut -d' ' -f1 /proc/uptime)
+elapsed() { awk -v a="$t0" -v b="$(cut -d' ' -f1 /proc/uptime)" 'BEGIN { printf "%.2f", b - a }'; }
+shell() {
+  log "$*"
+  log "dropping to a shell"
+  exec setsid cttyhack sh
+}
+
+. /etc/spore/userdata.sh
+userdata=
+for arg in $(cat /proc/cmdline); do
+  case $arg in
+  spore.userdata=*) userdata=${arg#spore.userdata=} ;;
+  spore.shell) shell "spore.shell on the kernel command line" ;;
+  esac
+done
+
+ip link set lo up
+iface=$(ls /sys/class/net | grep -v '^lo$' | head -n 1)
+[ -n "$iface" ] || shell "no network interface"
+ip link set "$iface" up
+udhcpc -i "$iface" -s /bin/dhcp-script -q -f -n -t 20 -T 1 >/dev/null || shell "no DHCP lease on $iface"
+log "network up on $iface after $(elapsed) s"
+
+if [ -n "$userdata" ]; then
+  wget -q -O /run/userdata "$userdata" || shell "no user-data at $userdata"
+else
+  userdata_fetch /run/userdata || shell "no user-data from the platform"
+fi
+jq -e '.spore.version == 1' /run/userdata >/dev/null || shell "user-data has no spore section of version 1"
+system=$(jq -r --arg a "$(uname -m)-linux" '.spore.system | if type == "object" then .[$a] else . end // empty' /run/userdata)
+[ -n "$system" ] || shell "user-data names no system for $(uname -m)-linux"
+substituters=$(jq -r '.spore.substituters // [] | join(" ")' /run/userdata)
+keys=$(jq -r '.spore."trusted-public-keys" // [] | join(" ")' /run/userdata)
+[ -n "$substituters" ] || shell "user-data names no substituter"
+[ -n "$keys" ] || shell "user-data names no trusted-public-keys"
+
+# The disk carries the ESP (label ESP) and the BIOS boot partition; the
+# system goes on partition 3, made here on the first boot.
+esp=$(findfs LABEL=ESP) || shell "no ESP"
+disk=/dev/$(basename "$(readlink -f "/sys/class/block/$(basename "$esp")/..")")
+case $disk in *[0-9]) part=${disk}p3 ;; *) part=${disk}3 ;; esac
+if [ ! -b "$part" ]; then
+  sfdisk --quiet --relocate gpt-bak-std "$disk"
+  echo 'type=linux' | sfdisk --quiet --append "$disk" || shell "cannot add partition 3 to $disk"
+  for _ in $(seq 50); do
+    [ -b "$part" ] && break
+    sleep 0.1
+  done
+fi
+mke2fs -q -F -t ext4 -L nixos -E lazy_itable_init=1,lazy_journal_init=1 "$part" || shell "mke2fs $part failed"
+mkdir -p /mnt
+mount -t ext4 "$part" /mnt || shell "cannot mount $part"
+log "disk ready after $(elapsed) s"
+
+store="local?root=/mnt"
+first=${substituters%% *}
+nix --extra-experimental-features nix-command copy \
+  --from "$first" --to "$store" \
+  --option trusted-public-keys "$keys" \
+  --option http-connections 64 --option max-substitution-jobs 64 \
+  --option build-users-group "" \
+  "$system" || shell "cannot fetch $system"
+log "fetched $system after $(elapsed) s"
+
+mkdir -p /mnt/nix/var/nix/profiles
+ln -sfn "$system" /mnt/nix/var/nix/profiles/system-1-link
+ln -sfn system-1-link /mnt/nix/var/nix/profiles/system
+
+kernel=/mnt$(readlink "/mnt$system/kernel")
+initrd=/mnt$(readlink "/mnt$system/initrd")
+cmdline="init=$system/init $(cat "/mnt$system/kernel-params")"
+
+export MTOOLS_SKIP_CHECK=1
+mmd -D s -i "$esp" ::/target 2>/dev/null || true
+mcopy -o -i "$esp" "$kernel" ::/target/kernel
+mcopy -o -i "$esp" "$initrd" ::/target/initrd
+mtype -i "$esp" ::/limine.conf >/run/limine.old
+{
+  sed -n '1,/^\//{/^\//d;p}' /run/limine.old
+  printf '/target\n    protocol: linux\n    path: boot():/target/kernel\n'
+  printf '    module_path: boot():/target/initrd\n    cmdline: %s\n    textmode: yes\n\n' "$cmdline"
+  sed -n '/^\/bootstrap$/,$p' /run/limine.old
+} >/run/limine.conf
+mcopy -o -i "$esp" /run/limine.conf ::/limine.conf
+log "boot entry written after $(elapsed) s"
+
+kexec -l "$kernel" --initrd="$initrd" --command-line="$cmdline" || shell "kexec -l failed"
+umount /mnt
+sync
+log "kexec into $system after $(elapsed) s"
+kexec -e
+shell "kexec -e returned"

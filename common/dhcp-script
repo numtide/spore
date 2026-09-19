@@ -1,0 +1,16 @@
+#!/bin/sh
+# udhcpc hook. Cloud DHCP often hands out a /32 with a gateway outside it
+# (hcloud: 172.31.1.1), which a plain `route add default gw` rejects: the
+# gateway gets an on-link host route first.
+case $1 in
+bound | renew)
+  ip addr flush dev "$interface"
+  ip addr add "$ip/${mask:-32}" dev "$interface"
+  for r in $router; do
+    ip route add "$r" dev "$interface" 2>/dev/null
+    ip route add default via "$r" dev "$interface" && break
+  done
+  : >/etc/resolv.conf
+  for d in $dns; do echo "nameserver $d" >>/etc/resolv.conf; done
+  ;;
+esac
