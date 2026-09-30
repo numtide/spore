@@ -1,7 +1,7 @@
-// Copied from ietsp src/store/nar.rs. restore_path is changed to write the
+// Copied from iets src/store/nar.rs. restore_path is changed to write the
 // canonical store metadata (mtime 1, no write bits) as it goes, so no second
 // pass over the tree is needed.
-// ietsp is LGPL-2.1-or-later; its author relicenses this copy under MIT (see LICENSE).
+// iets is LGPL-2.1-or-later; its author relicenses this copy under MIT (see LICENSE).
 
 use std::ffi::OsStr;
 use std::fs;
@@ -379,7 +379,7 @@ pub(crate) mod tests {
         write_padding(sink, s.len() as u64)
     }
 
-    /// ietsp's archive.cc:dumpPath port, kept to build NARs for the tests.
+    /// iets's archive.cc:dumpPath port, kept to build NARs for the tests.
     pub(crate) fn dump_path(path: &Path, sink: &mut dyn Write) -> io::Result<()> {
         write_str(sink, b"nix-archive-1")?;
         dump(path, sink)

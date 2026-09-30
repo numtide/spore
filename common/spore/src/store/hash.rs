@@ -1,6 +1,6 @@
-// Copied from ietsp src/store/hash.rs, cut down to sha256 and the encodings
+// Copied from iets src/store/hash.rs, cut down to sha256 and the encodings
 // that narinfo files and the nix database use.
-// ietsp is LGPL-2.1-or-later; its author relicenses this copy under MIT (see LICENSE).
+// iets is LGPL-2.1-or-later; its author relicenses this copy under MIT (see LICENSE).
 
 use std::fmt;
 use std::io::Write;

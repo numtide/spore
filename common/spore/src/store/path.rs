@@ -1,5 +1,5 @@
-// Copied from ietsp src/store/path.rs, cut down to parsing store paths.
-// ietsp is LGPL-2.1-or-later; its author relicenses this copy under MIT (see LICENSE).
+// Copied from iets src/store/path.rs, cut down to parsing store paths.
+// iets is LGPL-2.1-or-later; its author relicenses this copy under MIT (see LICENSE).
 
 use std::fmt;
 

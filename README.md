@@ -206,7 +206,7 @@ is no Rust mkfs.ext4.
 | ---------- | ------- |
 | `net`      | DHCP client. Adds a host route to a gateway outside the subnet (hcloud leases a /32). |
 | `fetch`    | Signed narinfo, 32 parallel downloads, xz and zstd, NarHash and NarSize checked on the stream |
-| `store`    | NAR restore with canonical metadata, through one 256 KiB window per download; copied from ietsp `src/store` (relicensed under MIT) |
+| `store`    | NAR restore with canonical metadata, through one 256 KiB window per download; copied from iets `src/store` (relicensed under MIT) |
 | `db`       | Registers the paths in the Nix database (schema 10) |
 | `repart`, `disk`, `gpt` | The partition layout and the GPT editor |
 | `esp`      | The target files and the boot counter on the FAT ESP; the kernel has no VFAT |
