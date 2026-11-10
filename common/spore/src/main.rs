@@ -208,23 +208,55 @@ fn args() -> Args {
     a
 }
 
+/// The user-data document, from an http(s) URL or from the EC2 metadata
+/// service: `imdsv2://HOST/PATH` takes a session token first.
 fn fetch_userdata(url: &str) -> Result<String, String> {
     let mut last = String::new();
     for _ in 0..10 {
-        match ureq::get(url).timeout(Duration::from_secs(5)).call() {
-            Ok(r) => {
-                let mut s = String::new();
-                r.into_reader()
-                    .take(1 << 20)
-                    .read_to_string(&mut s)
-                    .map_err(|e| format!("{url}: {e}"))?;
-                return Ok(s);
-            }
+        match get_userdata(url) {
+            Ok(s) => return Ok(s),
             Err(e) => last = format!("{url}: {e}"),
         }
         std::thread::sleep(Duration::from_secs(1));
     }
     Err(last)
+}
+
+fn get_userdata(url: &str) -> Result<String, String> {
+    let t = Duration::from_secs(5);
+    let r = match imds(url) {
+        Some((token_url, data_url)) => {
+            let token = ureq::put(&token_url)
+                .set("X-aws-ec2-metadata-token-ttl-seconds", "60")
+                .timeout(t)
+                .call()
+                .map_err(|e| format!("token: {e}"))?
+                .into_string()
+                .map_err(|e| format!("token: {e}"))?;
+            ureq::get(&data_url)
+                .set("X-aws-ec2-metadata-token", token.trim())
+                .timeout(t)
+                .call()
+        }
+        None => ureq::get(url).timeout(t).call(),
+    }
+    .map_err(|e| e.to_string())?;
+    let mut s = String::new();
+    r.into_reader()
+        .take(1 << 20)
+        .read_to_string(&mut s)
+        .map_err(|e| e.to_string())?;
+    Ok(s)
+}
+
+/// The token and data URLs of an `imdsv2://HOST/PATH` URL.
+fn imds(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix("imdsv2://")?;
+    let (host, path) = rest.split_once('/')?;
+    Some((
+        format!("http://{host}/latest/api/token"),
+        format!("http://{host}/{path}"),
+    ))
 }
 
 fn link(target: &str, at: &Path) -> Result<(), String> {
@@ -570,5 +602,23 @@ mod tests {
         std::os::unix::fs::symlink("loop", root.join("loop")).unwrap();
         assert!(resolve_in(&root, "/loop").is_err());
         fs::remove_dir_all(&root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod imds_tests {
+    use super::imds;
+
+    #[test]
+    fn imds_urls() {
+        assert_eq!(
+            imds("imdsv2://169.254.169.254/latest/user-data"),
+            Some((
+                "http://169.254.169.254/latest/api/token".to_string(),
+                "http://169.254.169.254/latest/user-data".to_string()
+            ))
+        );
+        assert_eq!(imds("http://169.254.169.254/hetzner/v1/userdata"), None);
+        assert_eq!(imds("imdsv2://host-only"), None);
     }
 }
