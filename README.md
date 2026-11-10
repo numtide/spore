@@ -108,9 +108,20 @@ On both, the user-data comes from `http://169.254.169.254/hetzner/v1/userdata`
 over plain HTTP. The bootstrap finds the disk through the ESP label, so it
 works on virtio-blk (`vda`), SCSI (`sda`) and NVMe (`nvme0n1`).
 
-Later platforms: AWS Nitro (ENA, NVMe, IMDSv2 with a session token, AMI),
-GCE (gVNIC, virtio-scsi, the `Metadata-Flavor` header, `disk.raw.tar.gz`),
-ISO and netboot bundles.
+`aws-aarch64` (Graviton sizes, VM and `.metal`):
+
+- Kernel: arm64 `defconfig` with ACPI, PSCI, ENA, NVMe and the SMMU driver in
+  passthrough mode (the metal sizes have an SMMU, the VM sizes none). virtio
+  is in for the QEMU boot test only. The bootstrap loads no modules.
+- Firmware: UEFI only. The AMI is registered with `--boot-mode uefi`.
+- Release disk: `aws-disk`, the same as `aws-disk-uki`.
+- Console: the serial console on `ttyS0`, from the ACPI SPCR table.
+- User-data: `imdsv2://169.254.169.254/latest/user-data`. The bootstrap
+  takes a session token (`PUT /latest/api/token`) and sends it with the
+  request, so the AMI can require IMDSv2.
+
+Later platforms: GCE (gVNIC, virtio-scsi, the `Metadata-Flavor` header,
+`disk.raw.tar.gz`), ISO and netboot bundles.
 
 ## Disk layout
 
@@ -402,11 +413,22 @@ Without the discard, the snapshot keeps the old data of the helper disk.
 Then `hcloud server create-image --type snapshot` makes the snapshot. A
 server from the snapshot needs user-data.
 
-## Lean hcloud target
+## Upload to AWS
 
-`targets/hcloud/` is a small NixOS system for the measurements. The flake
-exports it as `packages.<arch>-linux.hcloud-target`. It boots the kernel of
-its platform, which has every driver built in, so the target initrd loads
+`platforms/aws-aarch64/upload.sh NAME disk.img` writes the image to an EBS
+snapshot with [coldsnap](https://github.com/awslabs/coldsnap) (the EBS
+direct API, no S3 bucket) and registers the AMI: arm64, UEFI, ENA, IMDSv2
+required, root device `/dev/xvda`. An instance from the AMI needs
+user-data, and a root volume larger than the image: the bootstrap lays
+out the free space.
+
+## Lean targets
+
+`targets/lean.nix` is a small NixOS system for the measurements. The
+platform directories under `targets/` add the metadata service of the
+platform: the root ssh keys and the host name. The flake exports it as
+`packages.<arch>-linux.<platform>-target`. It boots the kernel of its
+platform, which has every driver built in, so the target initrd loads
 no modules. It has a slim systemd, nix without ICU or AWS, sshd without PAM,
 no setuid wrappers, and a short package list. It gets the root ssh keys from
 the metadata service. The bootstrap owns the disk layout, so the target has
