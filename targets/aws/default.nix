@@ -19,6 +19,7 @@ in
 {
   imports = [ ../lean.nix ];
 
+  spore.initrd = false;
   boot.kernelParams = [
     "console=ttyS0,115200n8"
     # https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/nvme-ebs-volumes.html#timeout-nvme-ebs-volumes
