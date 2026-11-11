@@ -43,7 +43,7 @@ use store::path::StorePath;
 use userdata::{Fallback, UserData};
 
 const ROOT: &str = "/mnt";
-const JOBS: usize = 32;
+const JOBS: usize = 96;
 
 fn mount(src: &str, dst: &str, fstype: &str) -> Result<(), String> {
     let _ = fs::create_dir_all(dst);
@@ -92,6 +92,10 @@ fn early_init() {
         }
     }
     unsafe { std::env::set_var("PATH", "/bin") };
+    // the fetch writes a few hundred MiB; with the default 10 % of RAM before
+    // background writeback starts, most of it waits for the sync before the
+    // kexec. Writing back from 16 MiB on overlaps it with the download.
+    let _ = fs::write("/proc/sys/vm/dirty_background_bytes", "16777216");
 }
 
 /// The CPU counter (TSC, CNTVCT). KVM starts it at 0 with the VM, so its value
@@ -239,12 +243,20 @@ fn args() -> Args {
 /// service: `imdsv2://HOST/PATH` takes a session token first.
 fn fetch_userdata(url: &str) -> Result<String, String> {
     let mut last = String::new();
-    for _ in 0..10 {
+    let mut wait = Duration::from_millis(50);
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_secs(30) {
         match get_userdata(url) {
             Ok(s) => return Ok(s),
-            Err(e) => last = format!("{url}: {e}"),
+            Err(e) => {
+                if last.is_empty() {
+                    log!("user-data: {e}; retrying");
+                }
+                last = format!("{url}: {e}");
+            }
         }
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(wait);
+        wait = (wait * 2).min(Duration::from_secs(2));
     }
     Err(last)
 }
@@ -319,7 +331,9 @@ fn target_layout(
             let base = base.as_os_str().to_string_lossy();
             if !store.join(&*base).exists() {
                 let sp = StorePath::from_base_name(&base).map_err(|e| e.0)?;
+                let t = Instant::now();
                 f.fetch_one(&sp, &store)?;
+                log!("layout: fetched {base} in {} ms", t.elapsed().as_millis());
             }
         }
         Ok(())
