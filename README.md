@@ -612,6 +612,14 @@ launch API call comes 5 to 6 s before the reset.
 | Boot good on the target | 5.75 s | 3.08 s |
 | ssh answers, after the launch call | 11.1 s | 5.5 s |
 
+The fetch depends on the cache edge. The run above found the closure on
+it. With Cloudflare serving narinfos and NARs from the edge (the cache
+rule on cache.numtide.com), the best run fetched in 1.96 s, kexeced at
+3.62 s and was good at 5.20 s. The first boot of a closure the edge has
+not seen fetched in 5.52 s and was good at 8.48 s. `cf-cache-status`
+answers `DYNAMIC` to a HEAD request even for a cached object; check with
+GET.
+
 On a c7g.metal (64 cores, 128 GiB) the bootstrap takes the same path in
 2.78 s from /init to the kexec, the target reaches multi-user in 1.6 s,
 and `/dev/kvm` is there. The firmware of a metal host takes minutes
