@@ -420,6 +420,16 @@ required, root device `/dev/xvda`. An instance from the AMI needs
 user-data, and a root volume larger than the image: the bootstrap lays
 out the free space.
 
+`platforms/aws-aarch64/measure.sh AMI SYSTEM [TYPE] [OUTDIR]` boots one
+spot instance from the AMI, collects the timings of the first boot and of
+a warm reboot (the bootstrap log, `systemd-analyze`, dmesg, the serial
+console, the good line) into `OUTDIR` and terminates it. It needs AWS
+credentials and `SPORE_SUBNET`, `SPORE_SG`, `SPORE_KEY` in the
+environment. Every time in the bootstrap log is seconds since `/init`;
+the `reset+` times and `spore stamp` on the target count from the reset
+of the machine instead, so one clock covers firmware, bootstrap and
+target.
+
 ## Lean targets
 
 `targets/lean.nix` is a small NixOS system for the measurements. The
