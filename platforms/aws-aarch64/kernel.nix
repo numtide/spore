@@ -52,6 +52,8 @@
     "SERIAL_AMBA_PL011_CONSOLE"
     "WATCHDOG"
     "WATCHDOG_CORE"
+    # boot-good.sh finds the softdog by /sys/class/watchdog/*/identity
+    "WATCHDOG_SYSFS"
     "SOFT_WATCHDOG"
     "VIRTIO"
     "VIRTIO_MENU"
