@@ -213,14 +213,13 @@ impl<D: Read + Write + Seek> ChunkCache<D> {
     }
 
     fn load(&mut self, i: u64) -> io::Result<()> {
-        self.chunk(i);
-        let c = self.chunks.get_mut(&i).unwrap();
-        if c.loaded {
+        if self.chunk(i).loaded {
             return Ok(());
         }
-        let mut b = vec![0u8; c.buf.len()];
+        let mut b = vec![0u8; self.chunk_len(i)];
         self.dev.seek(io::SeekFrom::Start(i * CHUNK))?;
         self.dev.read_exact(&mut b)?;
+        let c = self.chunk(i);
         for (s, w) in c.written.iter().enumerate() {
             if !w {
                 let r = s * SECTOR..((s + 1) * SECTOR).min(b.len());

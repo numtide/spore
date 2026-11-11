@@ -179,15 +179,9 @@ fn emergency() -> ! {
     }
 }
 
-/// Resolves `path` inside `root` as if `root` were `/`, following symlinks.
-#[cfg(test)]
-fn resolve_in(root: &Path, path: &str) -> Result<PathBuf, String> {
-    let logical = resolve_with(root, path, &mut |_| Ok(()))?;
-    Ok(root.join(logical.strip_prefix("/").unwrap()))
-}
-
-/// Like resolve_in, but returns the path as seen from inside `root`, and calls `visit`
-/// on each path before it looks at it.
+/// Resolves `path` inside `root` as if `root` were `/`, following symlinks; returns
+/// the path as seen from inside `root`, and calls `visit` on each path before it looks
+/// at it.
 fn resolve_with(
     root: &Path,
     path: &str,
@@ -339,9 +333,7 @@ fn target_layout(
             let base = base.as_os_str().to_string_lossy();
             if !store.join(&*base).exists() {
                 let sp = StorePath::from_base_name(&base).map_err(|e| e.0)?;
-                let t = Instant::now();
                 f.fetch_one(&sp, &store)?;
-                log!("layout: fetched {base} in {} ms", t.elapsed().as_millis());
             }
         }
         Ok(())
@@ -586,16 +578,16 @@ fn run(t0: Instant, c0: u64, a: &Args, net_up: &mut bool, failed: bool) -> Resul
     }
     let (kernel_path, kernel) =
         boot_file(&top, root, "kernel")?.ok_or("the system has no kernel")?;
-    let initrd = boot_file(&top, root, "initrd")?;
+    let (initrd_path, initrd) = boot_file(&top, root, "initrd")?.unzip();
     // the kernel and the initrd head the queue: the ESP takes them while the rest
     // downloads
     let mut roots = vec![kernel_path];
-    roots.extend(initrd.iter().map(|(p, _)| p.clone()));
-    let need = std::sync::Mutex::new(roots.iter().map(|p| p.to_string()).collect::<HashSet<_>>());
+    roots.extend(initrd_path);
+    let need = std::sync::Mutex::new(roots.iter().cloned().collect::<HashSet<_>>());
     let (tx, rx) = std::sync::mpsc::channel::<()>();
     let landed = move |p: &StorePath| {
         let mut n = need.lock().unwrap();
-        if n.remove(&p.to_string()) && n.is_empty() {
+        if n.remove(p) && n.is_empty() {
             log!("kernel and initrd fetched after {} s", s());
             let _ = tx.send(());
         }
@@ -606,7 +598,6 @@ fn run(t0: Instant, c0: u64, a: &Args, net_up: &mut bool, failed: bool) -> Resul
         params = format!("{} {params}", root_cmdline(&layout, &prep.mounts));
     }
     let cmdline = target_cmdline(&sys, &params);
-    let initrd = initrd.map(|(_, p)| p);
     let writer = {
         let (esp, kernel, initrd, cmdline) = (
             prep.esp.clone(),
@@ -774,6 +765,11 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn resolve_in(root: &Path, path: &str) -> Result<PathBuf, String> {
+        let logical = resolve_with(root, path, &mut |_| Ok(()))?;
+        Ok(root.join(logical.strip_prefix("/").unwrap()))
+    }
 
     #[test]
     fn root_by_label_for_a_target_without_initrd() {

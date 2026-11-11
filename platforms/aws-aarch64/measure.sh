@@ -56,7 +56,6 @@ for subnet in $SPORE_SUBNET; do
     exit 1
   }
   echo "no $market capacity in $subnet" >&2
-  id=
 done
 [ -n "$id" ] || {
   echo "no capacity in any subnet" >&2
@@ -74,8 +73,7 @@ ssh=(ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel
 
 # prints the seconds from the launch call to the first ssh answer
 wait_ssh() {
-  local i
-  for i in $(seq 1 240); do
+  for _ in $(seq 1 240); do
     if "${ssh[@]}" true 2>/dev/null; then
       awk -v a="$t_launch" -v b="$(date -u +%s.%N)" 'BEGIN { printf "%.1f", b - a }'
       return
@@ -104,7 +102,7 @@ sleep 5
 echo "warm reboot: ssh after $(wait_ssh) s" | tee -a "$out/summary"
 collect warm
 # the ESP path logs to the console only, which the API serves with a delay
-for i in $(seq 1 30); do
+for _ in $(seq 1 30); do
   aws ec2 get-console-output --instance-id "$id" --latest --query Output --output text >"$out/warm.console" 2>/dev/null || true
   grep -q 'on the ESP' "$out/warm.console" && break
   sleep 5
@@ -115,6 +113,7 @@ if [ -n "${SPORE_EXTRA:-}" ]; then
   if [ -n "${SPORE_EXTRA_DIR:-}" ]; then
     # one file per ssh: the lean target has neither tar nor scp
     for f in "$SPORE_EXTRA_DIR"/*; do
+      # shellcheck disable=SC2094
       "${ssh[@]}" "mkdir -p /var/tmp/extra && cat >/var/tmp/extra/$(basename "$f")" <"$f"
     done
   fi
