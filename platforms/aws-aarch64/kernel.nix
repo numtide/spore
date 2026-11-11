@@ -7,6 +7,17 @@
     "ACPI"
     "ACPI_BUTTON"
     "ACPI_SPCR_TABLE"
+    # the two-socket .metal-48xl sizes
+    "NUMA"
+    "ACPI_NUMA"
+    # Graviton2 is Neoverse-N1: "(rare)" errata that defconfig leaves out,
+    # applied by MIDR at runtime
+    "ARM64_ERRATUM_1542419"
+    "ARM64_ERRATUM_1286807"
+    # a builder wants throughput; defconfig picks full preemption
+    "PREEMPT_NONE"
+    "SOFTLOCKUP_DETECTOR"
+    "DETECT_HUNG_TASK"
     "ARM_PSCI_FW"
     # kexec parks the secondary CPUs through CPU hotplug, which arm64 only
     # offers with PM_SLEEP_SMP
@@ -47,6 +58,7 @@
     "HW_RANDOM_VIRTIO"
   ];
   disable = [
+    "PREEMPT"
     "DRM"
     "VT"
     "FB"
@@ -101,7 +113,6 @@
     "CPU_FREQ"
     "XEN"
     "HYPERV"
-    "NUMA"
     "I2C"
     "SPI"
     "GPIOLIB"
@@ -139,4 +150,8 @@
     "NET_VENDOR_TI"
     "NET_VENDOR_WANGXUN"
   ];
+  set = {
+    # 128 KiB overflows on a 64 to 192 CPU boot
+    LOG_BUF_SHIFT = "20";
+  };
 }
