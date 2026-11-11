@@ -9,7 +9,6 @@ use std::path::Path;
 
 pub struct Target<'a> {
     pub kernel: &'a Path,
-    /// None for a target whose kernel mounts the root itself
     pub initrd: Option<&'a Path>,
     pub cmdline: &'a str,
 }
@@ -168,11 +167,11 @@ impl<D: Read + Write + Seek> Esp<D> {
 const CHUNK: u64 = 1024 * 1024;
 const SECTOR: usize = 512;
 
-/// fatfs does sector-sized I/O. On a network disk each write into an uncached page
-/// costs a synchronous read (3.8 s for a NixOS kernel and initrd on hcloud cx23), so
-/// whole chunks are written back once. A chunk is read from the disk only for the
-/// sectors that are not written: on a fresh EBS volume the read of a block that the
-/// snapshot still keeps on S3 costs more than the write.
+/// fatfs does sector-sized I/O, and on a network disk each write into an uncached page
+/// costs a synchronous read (3.8 s for a kernel and initrd on hcloud cx23), so whole
+/// chunks are written back once. Only the sectors a write leaves alone are read: on a
+/// fresh EBS volume a block the snapshot still holds on S3 costs more to read than to
+/// write.
 pub struct ChunkCache<D> {
     dev: D,
     len: u64,
@@ -183,9 +182,8 @@ pub struct ChunkCache<D> {
 struct Chunk {
     buf: Vec<u8>,
     dirty: bool,
-    /// the disk contents are in `buf` under the sectors that are not written
+    /// the disk contents fill the sectors that are not written
     loaded: bool,
-    /// per sector: `buf` holds new data
     written: Vec<bool>,
 }
 
@@ -214,7 +212,6 @@ impl<D: Read + Write + Seek> ChunkCache<D> {
         })
     }
 
-    /// Reads the chunk from the disk under the sectors that are not written.
     fn load(&mut self, i: u64) -> io::Result<()> {
         self.chunk(i);
         let c = self.chunks.get_mut(&i).unwrap();
@@ -390,8 +387,8 @@ mod tests {
         };
         esp.write_target_files(&t).unwrap();
         esp.set_tries(Tries { left: 2, total: 3 }).unwrap();
-        // the FAT, the directories and the two partial chunks at the ends of the file:
-        // 12 MiB of data in 1 MiB chunks would be 12 reads more
+        // the FAT, the directories and the partial chunks at the ends of the file; a
+        // read per data chunk would be 12 more
         assert!(esp.c.dev.reads <= 5, "{} reads", esp.c.dev.reads);
         let out = dir.join("out");
         std::fs::create_dir_all(&out).unwrap();
@@ -428,7 +425,6 @@ mod tests {
             assert!(std::fs::read(out.join("kernel")).unwrap() == kernel);
             assert_eq!(std::fs::read(out.join("initrd")).unwrap(), b"initrd");
         }
-        // a target without an initrd replaces one with
         let t = Target {
             kernel: &dir.join("k"),
             initrd: None,

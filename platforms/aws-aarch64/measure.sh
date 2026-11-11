@@ -3,14 +3,15 @@
 # with SYSTEM as the spore target, collects the boot timings of the first
 # boot and of a warm reboot, terminates the instance and prints both.
 #
-# Needs AWS credentials in the environment, plus SPORE_SUBNET, SPORE_SG and
-# SPORE_KEY (an EC2 key pair whose private key ssh offers by default).
-# SPORE_MARKET=on-demand switches off the spot request. SPORE_LAYOUT is a
-# JSON layout for the user-data (the bootstrap then skips the lookup in the
-# system). SPORE_CLOSURE is the store path of the system's closureInfo (the
-# flake's <platform>-target-closure). SPORE_EXTRA names a script to run on
-# the target after the warm boot; its output lands in OUTDIR/extra.
-# SPORE_EXTRA_DIR is copied to /var/tmp/extra on the target first.
+# Needs AWS credentials in the environment, plus SPORE_SUBNET (one or more
+# subnet ids), SPORE_SG and SPORE_KEY (an EC2 key pair whose private key ssh
+# offers by default). Optional: SPORE_MARKET=on-demand instead of spot;
+# SPORE_EBS, extra Ebs= fields of the root volume (Iops=..,Throughput=..);
+# SPORE_SUBSTITUTER and SPORE_KEY_PUB, the cache and its key; SPORE_LAYOUT,
+# a JSON layout for the user-data; SPORE_CLOSURE, the store path of the
+# system's closureInfo (the flake's <platform>-target-closure); SPORE_EXTRA,
+# a script to run on the target after the warm boot, its output in
+# OUTDIR/extra, with SPORE_EXTRA_DIR copied to /var/tmp/extra first.
 set -euo pipefail
 
 ami=$1
@@ -71,7 +72,7 @@ while [ -z "$ip" ] || [ "$ip" = None ]; do
 done
 ssh=(ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5 "root@$ip")
 
-# waits for sshd, then prints the seconds since the launch call
+# prints the seconds from the launch call to the first ssh answer
 wait_ssh() {
   local i
   for i in $(seq 1 240); do
@@ -85,7 +86,6 @@ wait_ssh() {
   return 1
 }
 
-# collect NAME: the timings of the running boot into $out/NAME.*
 collect() {
   "${ssh[@]}" 'cat /var/log/spore.log' >"$out/$1.spore" 2>/dev/null || true
   "${ssh[@]}" 'systemd-analyze; systemd-analyze critical-chain --no-pager; systemd-analyze blame --no-pager | head -20' >"$out/$1.systemd" 2>/dev/null || true

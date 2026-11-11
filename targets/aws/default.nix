@@ -20,8 +20,8 @@ in
   imports = [ ../lean.nix ];
 
   spore.initrd = false;
-  # advertised even when nix probes before /dev/kvm is there; the VM sizes
-  # have no /dev/kvm, which the lean target does not mind
+  # fixed, so a nix that probes before /dev/kvm appears still offers kvm;
+  # the VM sizes have none and do not mind
   nix.settings.system-features = [
     "nixos-test"
     "benchmark"

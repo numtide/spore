@@ -68,7 +68,6 @@
     "VT"
     "FB"
     "SYSFB_SIMPLEFB"
-    # SoC platforms of the arm64 defconfig
     "ARCH_ACTIONS"
     "ARCH_AIROHA"
     "ARCH_SUNXI"

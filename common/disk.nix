@@ -13,8 +13,8 @@
   cmdline ? "quiet",
   # boot the bootstrap on UEFI as a UKI that Limine chainloads
   uki ? false,
-  # the UKI is the EFI boot file itself, with no Limine on the disk: one
-  # hop less on a UEFI-only platform
+  # the UKI is the EFI boot file itself, no Limine: one hop less on a
+  # UEFI-only platform
   efiDirect ? false,
   ukiKernel ? kernel,
 }:

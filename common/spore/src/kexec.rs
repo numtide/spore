@@ -10,9 +10,9 @@ const SYS_KEXEC_FILE_LOAD: libc::c_long = libc::SYS_kexec_file_load;
 #[cfg(target_arch = "aarch64")]
 const SYS_KEXEC_FILE_LOAD: libc::c_long = 294;
 
-/// Loads the next kernel with kexec_file_load(2); needs CONFIG_KEXEC_FILE.
 const KEXEC_FILE_NO_INITRAMFS: libc::c_ulong = 0x4;
 
+/// Loads the next kernel with kexec_file_load(2); needs CONFIG_KEXEC_FILE.
 pub fn load(kernel: &Path, initrd: Option<&Path>, cmdline: &str) -> Result<(), String> {
     let k = File::open(kernel).map_err(|e| format!("{}: {e}", kernel.display()))?;
     let i = initrd

@@ -13,8 +13,7 @@ pub struct UserData {
     /// repart definitions; see Layout::from_json.
     pub layout: Option<serde_json::Value>,
     /// A store path with a `store-paths` file: the closure of the system, one path
-    /// per line (nixpkgs' closureInfo). With it the bootstrap asks for every
-    /// narinfo at once instead of walking the references level by level.
+    /// per line (nixpkgs' closureInfo).
     pub closure: Option<String>,
     /// Boots of the target without a good mark before the bootstrap takes over.
     pub boot_tries: u8,

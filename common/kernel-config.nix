@@ -19,7 +19,6 @@ let
   arch = stdenv.hostPlatform.linuxArch;
   flags = f: lib.concatMapStringsSep " " (o: "--${f} ${o}");
   wanted = lib.subtractLists (base.disable ++ fragment.disable) (base.enable ++ fragment.enable);
-  # value options, NAME = "VALUE"; checked verbatim after olddefconfig
   set = fragment.set or { };
   setFlags = lib.concatStrings (lib.mapAttrsToList (n: v: " --set-val ${n} ${v}") set);
 in

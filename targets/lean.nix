@@ -22,9 +22,7 @@
     description = ''
       Boot through the systemd initrd. Off, the kernel mounts the root
       partition itself (the bootstrap passes `root=PARTLABEL=...`) and
-      stage 2 starts systemd once instead of twice: about 1 s less on a
-      t4g.small. The platform kernel has every driver built in, so nothing
-      in the initrd is needed to find the disk.
+      systemd starts once instead of twice: about 1 s less on a t4g.small.
     '';
   };
 
@@ -38,9 +36,8 @@
     boot.kernelParams = [
       "quiet"
       "udev.log_level=3"
-      # without /etc/machine-id, PID 1 takes the boot for the first one and
-      # populates /etc from the presets: 0.3 s for nothing, units are enabled
-      # in the store
+      # without /etc/machine-id PID 1 takes every boot for the first one and
+      # spends 0.3 s on the presets, which enable nothing the store does not
       "systemd.condition_first_boot=0"
       # without a configured size, PID 1 queries the console with ANSI
       # sequences that never get an answer and waits 333 ms, in the initrd and
@@ -158,8 +155,7 @@
     services.fstrim.enable = false;
     programs.nano.enable = false;
     security.sudo.enable = false;
-    # pam_lastlog2 is the lastlog output of the full util-linux; nothing
-    # reads /var/lib/lastlog on a builder
+    # pam_lastlog2 comes with the full util-linux, which the AWS target drops
     security.pam.services.login.lastlog.enable = lib.mkForce false;
     system.disableInstallerTools = true;
     services.lvm.enable = false;

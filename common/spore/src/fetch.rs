@@ -193,8 +193,8 @@ impl Fetcher {
                         cv.notify_all();
                         return;
                     }
-                    // a download before the next narinfo: the bytes start to flow
-                    // while the graph is still being discovered
+                    // a download before the next narinfo: bytes flow while the graph
+                    // is still being discovered
                     if let Some((sub, ni)) = st.nars.pop_front() {
                         break Task::Nar(sub, ni);
                     }

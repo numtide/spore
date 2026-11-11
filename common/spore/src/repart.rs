@@ -30,10 +30,10 @@ pub struct Partition {
     pub padding_weight: u64,
     /// MountPoint=: where the bootstrap mounts it below /mnt.
     pub mount: Option<String>,
-    /// Journal=, a spore key: ext4 with a journal. Off by default: a journaled ext4
-    /// reads about 7 blocks per block group on every mount (470 reads and 280 ms
-    /// for 8 GiB on a cold EBS volume), the bootstrap and then the target each
-    /// pay it, and a target that a crash leaves inconsistent is provisioned again.
+    /// Journal=, a spore key, off by default: a journaled ext4 reads about 7 blocks per
+    /// block group on every mount (280 ms for 8 GiB on a cold EBS volume), paid by the
+    /// bootstrap and again by the target. A target that a crash leaves inconsistent is
+    /// provisioned again.
     pub journal: bool,
     /// Keys that change what a new partition holds, which this does not do yet
     /// (Encrypt=, CopyFiles=, ...). They matter only when the partition is created.

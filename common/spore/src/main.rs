@@ -92,9 +92,9 @@ fn early_init() {
         }
     }
     unsafe { std::env::set_var("PATH", "/bin") };
-    // the fetch writes a few hundred MiB; with the default 10 % of RAM before
-    // background writeback starts, most of it waits for the sync before the
-    // kexec. Writing back from 16 MiB on overlaps it with the download.
+    // the fetch writes a few hundred MiB, and the default writeback threshold (10 %
+    // of RAM) leaves most of it to the sync before the kexec; from 16 MiB on it
+    // overlaps the download
     let _ = fs::write("/proc/sys/vm/dirty_background_bytes", "16777216");
 }
 
@@ -111,17 +111,17 @@ fn counter() -> u64 {
     }
 }
 
-/// Seconds since the reset at the start of /init (`c0` is the counter then) and now,
-/// and the counter rate. The rate comes from the counter and the monotonic clock
-/// since the start, so the start costs no calibration time.
+/// Seconds from the reset to the start of /init (`c0` is the counter then) and to now,
+/// and the counter rate, taken from the counter and the monotonic clock since the
+/// start: no calibration at the start.
 fn since_reset(t0: Instant, c0: u64) -> (f64, f64, f64) {
     let c = counter();
     let rate = (c - c0) as f64 / t0.elapsed().as_secs_f64();
     (c0 as f64 / rate, c as f64 / rate, rate)
 }
 
-/// The counter rate in Hz for `spore stamp`: the architected register on arm64; else
-/// the rate the bootstrap measured, from its log on the target.
+/// Hz. x86 has no architected TSC rate, so there it comes from the bootstrap log on
+/// the target.
 fn counter_rate() -> Option<f64> {
     #[cfg(target_arch = "aarch64")]
     {
@@ -145,8 +145,7 @@ fn rate_from_log(log: &str) -> Option<f64> {
     })
 }
 
-/// User and system CPU time of this process so far, in seconds: whether the fetch is
-/// bound by the CPUs or by the network shows here.
+/// (user, system) CPU seconds of this process so far.
 fn cpu_seconds() -> (f64, f64) {
     let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
     unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) };
@@ -249,8 +248,6 @@ fn args() -> Args {
     a
 }
 
-/// The user-data document, from an http(s) URL or from the EC2 metadata
-/// service: `imdsv2://HOST/PATH` takes a session token first.
 fn fetch_userdata(url: &str) -> Result<String, String> {
     let mut last = String::new();
     let mut wait = Duration::from_millis(50);
@@ -298,7 +295,8 @@ fn get_userdata(url: &str) -> Result<String, String> {
     Ok(s)
 }
 
-/// The token and data URLs of an `imdsv2://HOST/PATH` URL.
+/// The token and data URLs of an `imdsv2://HOST/PATH` URL: the EC2 metadata service
+/// wants a session token first.
 fn imds(url: &str) -> Option<(String, String)> {
     let rest = url.strip_prefix("imdsv2://")?;
     let (host, path) = rest.split_once('/')?;
@@ -394,7 +392,6 @@ fn pull(
     Ok((infos.len(), bytes))
 }
 
-/// The store paths in the `store-paths` file of `closure`, fetched into `ram`.
 fn closure_list(f: &fetch::Fetcher, closure: &str, ram: &Path) -> Result<Vec<StorePath>, String> {
     let sp = StorePath::parse(closure).map_err(|e| e.0)?;
     let dir = ram.join(closure.trim_start_matches('/'));
@@ -410,8 +407,8 @@ fn closure_list(f: &fetch::Fetcher, closure: &str, ram: &Path) -> Result<Vec<Sto
         .collect()
 }
 
-/// The store path behind the `kernel` or `initrd` link of the system at `top`, and
-/// where that file is under `root`. None when the system has no such link.
+/// The store path behind the `name` link of the system at `top`, and where that file
+/// is under `root`; None when the system has no such link.
 fn boot_file(top: &Path, root: &Path, name: &str) -> Result<Option<(StorePath, PathBuf)>, String> {
     let target = match fs::read_link(top.join(name)) {
         Ok(t) => t,
@@ -438,8 +435,8 @@ fn boot_file(top: &Path, root: &Path, name: &str) -> Result<Option<(StorePath, P
     )))
 }
 
-/// What a target without an initrd needs to mount its root: the kernel finds the
-/// partition by label, so a renumbered NVMe disk does not matter.
+/// For a target without an initrd. PARTLABEL rather than the device: NVMe disks
+/// renumber between boots.
 fn root_cmdline(layout: &Layout, mounts: &[(String, PathBuf)]) -> String {
     let p = layout
         .partitions
@@ -581,7 +578,6 @@ fn run(t0: Instant, c0: u64, a: &Args, net_up: &mut bool, failed: bool) -> Resul
         log!("not mounting {m}: no ext4 on it");
     }
 
-    // the kernel and the initrd first: the ESP takes them while the rest downloads
     let sys = system.to_string();
     let ram = Path::new("/run/spore");
     let top = ram.join(sys.trim_start_matches('/'));
@@ -591,7 +587,8 @@ fn run(t0: Instant, c0: u64, a: &Args, net_up: &mut bool, failed: bool) -> Resul
     let (kernel_path, kernel) =
         boot_file(&top, root, "kernel")?.ok_or("the system has no kernel")?;
     let initrd = boot_file(&top, root, "initrd")?;
-    // the two go first in the queue; the ESP writer starts when both have landed
+    // the kernel and the initrd head the queue: the ESP takes them while the rest
+    // downloads
     let mut roots = vec![kernel_path];
     roots.extend(initrd.iter().map(|(p, _)| p.clone()));
     let need = std::sync::Mutex::new(roots.iter().map(|p| p.to_string()).collect::<HashSet<_>>());
@@ -634,8 +631,8 @@ fn run(t0: Instant, c0: u64, a: &Args, net_up: &mut bool, failed: bool) -> Resul
         })
     };
 
-    // with the closure list, every narinfo is asked for at once: the reference
-    // graph of a NixOS system is 7 levels deep, one round trip each otherwise
+    // with the closure list every narinfo is asked for at once; the reference graph
+    // of a NixOS system is 7 levels deep, one round trip each otherwise
     roots.push(system.clone());
     if let Some(c) = &ud.closure {
         let t = Instant::now();

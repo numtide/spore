@@ -5,7 +5,7 @@
 set -eu
 export MTOOLS_SKIP_CHECK=1
 
-# the stamp first: it marks the moment the boot is good, before the ESP work
+# before the ESP work: the stamp marks the moment the boot is good
 if command -v spore >/dev/null 2>&1; then
   echo "boot good at $(spore stamp)"
 fi
