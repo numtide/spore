@@ -442,6 +442,17 @@ no setuid wrappers, and a short package list. It gets the root ssh keys from
 the metadata service. The bootstrap owns the disk layout, so the target has
 no growpart or repart. It imports `targets/boot-good.nix`.
 
+`spore.initrd = false` drops the initrd: the bootstrap then passes
+`root=PARTLABEL=<label>` and the kernel mounts the root itself, stage 2
+runs the activation script and starts systemd once. The AWS target boots
+this way: multi-user in 2.0 s instead of 2.9 s on a t4g.small, 18 MiB
+less to fetch, and `kexec_file_load` takes 6 ms instead of 220 ms. The
+lean target also passes `systemd.condition_first_boot=0`, because PID 1
+takes a boot without `/etc/machine-id` for the first one and spends 0.3 s
+populating `/etc` from presets that enable nothing the store does not. The
+AWS target builds its NixOS with `util-linux` overridden to the minimal
+build that systemd already brings, 28 MiB less in the closure.
+
 ## Design notes
 
 - **Limine alone cannot count boots.** Limine writes no file. Its only
@@ -566,6 +577,35 @@ rows are from the start of /init.
 
 In the disk step, mke2fs took 18–32 ms and the GPT re-read took 8–25 ms,
 with no retries.
+
+### The bootstrap on EC2
+
+t4g.small (2 vCPU, Graviton2), eu-central-1, 8 GiB gp3 root volume with
+the default 125 MiB/s, AMI from `aws-disk`, the lean target without
+initrd, closure from cache.numtide.com. Times from the reset of the
+machine, which on a VM is the start of the instance. One run each, from
+`measure.sh`; the launch API call comes 5 to 6 s before the reset.
+
+| Step | First boot | Warm reboot |
+| ---- | ---------- | ----------- |
+| /init | 1.28 s | 1.23 s |
+| Layout read from the system | 1.78 s | |
+| Disk ready | 2.06 s | |
+| Kernel and initrd fetched | 2.4 s | |
+| Closure fetched, 277 paths, 289 MiB | 4.31 s | |
+| Boot entry armed | 4.38 s | |
+| kexec | 4.39 s | 1.36 s |
+| Boot good on the target | 6.56 s | 3.48 s |
+| ssh answers, after the launch call | 12.3 s | 5.5 s |
+
+Before this round of measurements the first boot was good at 10.1 s and
+the warm reboot at 4.7 s. What moved it: the ESP chunk cache no longer
+reads the blocks it overwrites (the snapshot still holds them on S3), the
+ESP is written while the closure downloads, writeback starts during the
+fetch instead of in the sync before the kexec, the target has no initrd,
+and PID 1 skips the first-boot preset run. A gp3 volume at 1000 MiB/s
+changes none of the remaining steps but the sync and the ESP write, so
+the rest is CPU, network latency and systemd.
 
 ### Boot-count fallback
 
