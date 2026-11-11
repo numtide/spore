@@ -20,6 +20,14 @@ in
   imports = [ ../lean.nix ];
 
   spore.initrd = false;
+  # advertised even when nix probes before /dev/kvm is there; the VM sizes
+  # have no /dev/kvm, which the lean target does not mind
+  nix.settings.system-features = [
+    "nixos-test"
+    "benchmark"
+    "big-parallel"
+    "kvm"
+  ];
   boot.kernelParams = [
     "console=ttyS0,115200n8"
     # https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/nvme-ebs-volumes.html#timeout-nvme-ebs-volumes

@@ -7,6 +7,9 @@
     "ACPI"
     "ACPI_BUTTON"
     "ACPI_SPCR_TABLE"
+    # the metal builder runs NixOS VM tests; the base fragment turns these off
+    "VIRTUALIZATION"
+    "KVM"
     # the two-socket .metal-48xl sizes
     "NUMA"
     "ACPI_NUMA"
