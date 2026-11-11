@@ -172,6 +172,7 @@ fn emergency() -> ! {
 }
 
 /// Resolves `path` inside `root` as if `root` were `/`, following symlinks.
+#[cfg(test)]
 fn resolve_in(root: &Path, path: &str) -> Result<PathBuf, String> {
     let logical = resolve_with(root, path, &mut |_| Ok(()))?;
     Ok(root.join(logical.strip_prefix("/").unwrap()))
@@ -363,7 +364,7 @@ fn target_layout(
 
 /// Pulls the closure of `system` into `root` and registers it. Returns the number of
 /// paths added and their NAR bytes.
-fn pull(root: &Path, system: &StorePath, f: &fetch::Fetcher) -> Result<(usize, u64), String> {
+fn pull(root: &Path, roots: &[StorePath], f: &fetch::Fetcher) -> Result<(usize, u64), String> {
     let mut db = db::open(root)?;
     let valid: HashSet<String> = {
         let mut q = db
@@ -374,9 +375,55 @@ fn pull(root: &Path, system: &StorePath, f: &fetch::Fetcher) -> Result<(usize, u
             .collect::<Result<_, _>>()
             .map_err(|e| e.to_string())?
     };
-    let (infos, bytes) = f.pull(std::slice::from_ref(system), &valid, JOBS)?;
+    let (infos, bytes) = f.pull(roots, &valid, JOBS)?;
     db::register(&mut db, &infos)?;
     Ok((infos.len(), bytes))
+}
+
+/// The store path behind the `kernel` or `initrd` link of the system at `top`, and
+/// where that file is under `root`. None when the system has no such link.
+fn boot_file(top: &Path, root: &Path, name: &str) -> Result<Option<(StorePath, PathBuf)>, String> {
+    let target = match fs::read_link(top.join(name)) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", top.join(name).display())),
+    };
+    let rel = target.strip_prefix("/nix/store").map_err(|_| {
+        format!(
+            "{name} of the system points outside the store: {}",
+            target.display()
+        )
+    })?;
+    let base = rel
+        .components()
+        .next()
+        .ok_or("empty store path")?
+        .as_os_str()
+        .to_string_lossy()
+        .into_owned();
+    let sp = StorePath::from_base_name(&base).map_err(|e| e.0)?;
+    Ok(Some((
+        sp,
+        root.join(target.strip_prefix("/").unwrap_or(&target)),
+    )))
+}
+
+/// What a target without an initrd needs to mount its root: the kernel finds the
+/// partition by label, so a renumbered NVMe disk does not matter.
+fn root_cmdline(layout: &Layout, mounts: &[(String, PathBuf)]) -> String {
+    let p = layout
+        .partitions
+        .iter()
+        .find(|p| p.mount.as_deref() == Some("/"));
+    let dev = match p.and_then(|p| p.label.as_deref()) {
+        Some(l) => format!("PARTLABEL={l}"),
+        None => mounts
+            .first()
+            .map(|(_, d)| d.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    };
+    let fstype = p.and_then(|p| p.format.as_deref()).unwrap_or("ext4");
+    format!("root={dev} rootfstype={fstype} rw rootwait")
 }
 
 /// `init=` and the target's kernel-params. A panic resets the machine, so the next
@@ -421,12 +468,17 @@ fn boot_target(t0: Instant, c0: u64) -> Result<Option<Tries>, String> {
     let out = Path::new("/run/spore/target");
     fs::create_dir_all(out).map_err(|e| e.to_string())?;
     let t = Instant::now();
-    let cmdline = esp.read_target(out).map_err(err)?;
+    let (cmdline, has_initrd) = esp.read_target(out).map_err(err)?;
     let left = tries.left - 1;
     esp.set_tries(Tries { left, ..tries }).map_err(err)?;
     log!("target read from the ESP in {} ms", t.elapsed().as_millis());
     let t = Instant::now();
-    kexec::load(&out.join("kernel"), &out.join("initrd"), &cmdline)?;
+    let initrd = out.join("initrd");
+    kexec::load(
+        &out.join("kernel"),
+        has_initrd.then_some(initrd.as_path()),
+        &cmdline,
+    )?;
     log!("kexec loaded in {} ms", t.elapsed().as_millis());
     let (start, now, _) = since_reset(t0, c0);
     log!("started {start:.2} s after the reset");
@@ -499,50 +551,77 @@ fn run(t0: Instant, c0: u64, a: &Args, net_up: &mut bool, failed: bool) -> Resul
         log!("not mounting {m}: no ext4 on it");
     }
 
-    let (n, bytes) = pull(root, &system, &f)?;
+    // the kernel and the initrd first: the ESP takes them while the rest downloads
+    let sys = system.to_string();
+    let ram = Path::new("/run/spore");
+    let top = ram.join(sys.trim_start_matches('/'));
+    if !top.exists() {
+        f.fetch_one(&system, &ram.join("nix/store"))?;
+    }
+    let (kernel_path, kernel) =
+        boot_file(&top, root, "kernel")?.ok_or("the system has no kernel")?;
+    let initrd = boot_file(&top, root, "initrd")?;
+    let mut first = vec![kernel_path];
+    first.extend(initrd.iter().map(|(p, _)| p.clone()));
+    let (n0, bytes0) = pull(root, &first, &f)?;
+    log!("kernel and initrd fetched after {} s", s());
+
+    let mut params = fs::read_to_string(top.join("kernel-params")).unwrap_or_default();
+    if initrd.is_none() {
+        params = format!("{} {params}", root_cmdline(&layout, &prep.mounts));
+    }
+    let cmdline = target_cmdline(&sys, &params);
+    let initrd = initrd.map(|(_, p)| p);
+    let size = |p: &Path| fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    let mib = (size(&kernel) + initrd.as_deref().map(size).unwrap_or(0)) >> 20;
+    let writer = {
+        let (esp, kernel, initrd, cmdline) = (
+            prep.esp.clone(),
+            kernel.clone(),
+            initrd.clone(),
+            cmdline.clone(),
+        );
+        std::thread::spawn(move || -> Result<u128, String> {
+            let t = Instant::now();
+            esp::Esp::open(&esp)?
+                .write_target_files(&esp::Target {
+                    kernel: &kernel,
+                    initrd: initrd.as_deref(),
+                    cmdline: &cmdline,
+                })
+                .map_err(|e| format!("ESP {}: {e}", esp.display()))?;
+            Ok(t.elapsed().as_millis())
+        })
+    };
+
+    let (n, bytes) = pull(root, std::slice::from_ref(&system), &f)?;
     log!(
         "fetched {system} after {} s: {} paths, {} MiB",
         s(),
-        n,
-        bytes >> 20
+        n + n0,
+        (bytes + bytes0) >> 20
     );
 
     let profiles = root.join("nix/var/nix/profiles");
     fs::create_dir_all(&profiles).map_err(|e| e.to_string())?;
-    link(&system.to_string(), &profiles.join("system-1-link"))?;
+    link(&sys, &profiles.join("system-1-link"))?;
     link("system-1-link", &profiles.join("system"))?;
 
-    let sys = system.to_string();
-    let kernel = resolve_in(root, &format!("{sys}/kernel"))?;
-    let initrd = resolve_in(root, &format!("{sys}/initrd"))?;
-    let params =
-        fs::read_to_string(resolve_in(root, &format!("{sys}/kernel-params"))?).unwrap_or_default();
-    let cmdline = target_cmdline(&sys, &params);
+    let ms = writer.join().map_err(|_| "the ESP writer panicked")??;
     let total = ud.boot_tries;
-    let t = Instant::now();
-    let size = |p: &Path| fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-    let mib = (size(&kernel) + size(&initrd)) >> 20;
     esp::Esp::open(&prep.esp)?
-        .write_target(
-            &esp::Target {
-                kernel: &kernel,
-                initrd: &initrd,
-                cmdline: &cmdline,
-            },
-            Tries {
-                left: total - 1,
-                total,
-            },
-        )
+        .set_tries(Tries {
+            left: total - 1,
+            total,
+        })
         .map_err(|e| format!("ESP {}: {e}", prep.esp.display()))?;
     log!(
-        "boot entry written after {} s: {total} tries, {mib} MiB in {} ms",
-        s(),
-        t.elapsed().as_millis()
+        "boot entry written after {} s: {total} tries, {mib} MiB in {ms} ms alongside the fetch",
+        s()
     );
 
     let t = Instant::now();
-    kexec::load(&kernel, &initrd, &cmdline)?;
+    kexec::load(&kernel, initrd.as_deref(), &cmdline)?;
     log!("kexec loaded in {} ms", t.elapsed().as_millis());
     let (start, now, rate) = since_reset(t0, c0);
     log!("started {start:.2} s after the reset; counter rate {rate:.0} Hz");
@@ -578,7 +657,8 @@ fn main() {
             .and_then(|s| UserData::parse(&s))
             .and_then(|ud| {
                 let (system, f) = fetcher(&ud, Path::new(root))?;
-                pull(Path::new(root), &system, &f).map(|(n, b)| (system, n, b))
+                pull(Path::new(root), std::slice::from_ref(&system), &f)
+                    .map(|(n, b)| (system, n, b))
             });
         match r {
             Ok((system, n, bytes)) => log!(
@@ -644,6 +724,14 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_by_label_for_a_target_without_initrd() {
+        assert_eq!(
+            root_cmdline(&Layout::default_convention(), &[]),
+            "root=PARTLABEL=nixos rootfstype=ext4 rw rootwait"
+        );
+    }
 
     #[test]
     fn rate_from_the_log() {

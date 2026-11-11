@@ -9,7 +9,8 @@ use std::path::Path;
 
 pub struct Target<'a> {
     pub kernel: &'a Path,
-    pub initrd: &'a Path,
+    /// None for a target whose kernel mounts the root itself
+    pub initrd: Option<&'a Path>,
     pub cmdline: &'a str,
 }
 
@@ -119,9 +120,9 @@ impl<D: Read + Write + Seek> Esp<D> {
         self.commit()
     }
 
-    /// Writes the target files, then `tries`. The old counter goes first, so a target
-    /// with files from two systems never starts.
-    pub fn write_target(&mut self, t: &Target<'_>, tries: Tries) -> io::Result<()> {
+    /// Writes the target files. The old counter goes first, so a target with files
+    /// from two systems never starts; `set_tries` arms the new one.
+    pub fn write_target_files(&mut self, t: &Target<'_>) -> io::Result<()> {
         self.with(|root| match root.create_dir("target")?.remove("tries") {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
@@ -130,22 +131,36 @@ impl<D: Read + Write + Seek> Esp<D> {
         self.with(|root| {
             let dir = root.open_dir("target")?;
             copy_in(&dir, "kernel", t.kernel)?;
-            copy_in(&dir, "initrd", t.initrd)?;
+            match t.initrd {
+                Some(i) => copy_in(&dir, "initrd", i)?,
+                None => match dir.remove("initrd") {
+                    Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                    _ => {}
+                },
+            }
             write_small(&dir, "cmdline", t.cmdline.as_bytes())
         })?;
-        self.commit()?;
-        self.set_tries(tries)
+        self.commit()
     }
 
     /// Copies the target kernel and initrd to `out/kernel` and `out/initrd`; returns the
-    /// command line.
-    pub fn read_target(&mut self, out: &Path) -> io::Result<String> {
+    /// command line and whether there is an initrd.
+    pub fn read_target(&mut self, out: &Path) -> io::Result<(String, bool)> {
         self.with(|root| {
             let dir = root.open_dir("target")?;
-            for n in ["kernel", "initrd"] {
-                io::copy(&mut dir.open_file(n)?, &mut File::create(out.join(n))?)?;
-            }
-            Ok(read_small(&dir, "cmdline")?.trim().to_string())
+            io::copy(
+                &mut dir.open_file("kernel")?,
+                &mut File::create(out.join("kernel"))?,
+            )?;
+            let initrd = match dir.open_file("initrd") {
+                Ok(mut f) => {
+                    io::copy(&mut f, &mut File::create(out.join("initrd"))?)?;
+                    true
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+                Err(e) => return Err(e),
+            };
+            Ok((read_small(&dir, "cmdline")?.trim().to_string(), initrd))
         })
     }
 }
@@ -370,16 +385,17 @@ mod tests {
         .unwrap();
         let t = Target {
             kernel: &dir.join("k"),
-            initrd: &dir.join("i"),
+            initrd: Some(&dir.join("i")),
             cmdline: "init=/nix/store/x/init",
         };
-        esp.write_target(&t, Tries { left: 2, total: 3 }).unwrap();
+        esp.write_target_files(&t).unwrap();
+        esp.set_tries(Tries { left: 2, total: 3 }).unwrap();
         // the FAT, the directories and the two partial chunks at the ends of the file:
         // 12 MiB of data in 1 MiB chunks would be 12 reads more
         assert!(esp.c.dev.reads <= 5, "{} reads", esp.c.dev.reads);
         let out = dir.join("out");
         std::fs::create_dir_all(&out).unwrap();
-        esp.read_target(&out).unwrap();
+        assert!(esp.read_target(&out).unwrap().1);
         assert!(std::fs::read(out.join("kernel")).unwrap() == kernel);
         let mut again = Esp::new(esp.c.dev, |_| Ok(())).unwrap();
         assert_eq!(again.tries().unwrap(), Some(Tries { left: 2, total: 3 }));
@@ -400,17 +416,36 @@ mod tests {
         for cmdline in ["init=/nix/store/x/init panic=10", "init=/nix/store/y/init"] {
             let t = Target {
                 kernel: &dir.join("k"),
-                initrd: &dir.join("i"),
+                initrd: Some(&dir.join("i")),
                 cmdline,
             };
-            esp.write_target(&t, Tries { left: 2, total: 3 }).unwrap();
+            esp.write_target_files(&t).unwrap();
+            esp.set_tries(Tries { left: 2, total: 3 }).unwrap();
             assert_eq!(esp.tries().unwrap(), Some(Tries { left: 2, total: 3 }));
             let out = dir.join("out");
             std::fs::create_dir_all(&out).unwrap();
-            assert_eq!(esp.read_target(&out).unwrap(), cmdline);
+            assert_eq!(esp.read_target(&out).unwrap(), (cmdline.to_string(), true));
             assert!(std::fs::read(out.join("kernel")).unwrap() == kernel);
             assert_eq!(std::fs::read(out.join("initrd")).unwrap(), b"initrd");
         }
+        // a target without an initrd replaces one with
+        let t = Target {
+            kernel: &dir.join("k"),
+            initrd: None,
+            cmdline: "init=/nix/store/z/init root=PARTLABEL=nixos",
+        };
+        esp.write_target_files(&t).unwrap();
+        esp.set_tries(Tries { left: 1, total: 3 }).unwrap();
+        let out = dir.join("out2");
+        std::fs::create_dir_all(&out).unwrap();
+        assert_eq!(
+            esp.read_target(&out).unwrap(),
+            (
+                "init=/nix/store/z/init root=PARTLABEL=nixos".to_string(),
+                false
+            )
+        );
+        assert!(!out.join("initrd").exists());
         esp.set_tries(Tries { left: 0, total: 3 }).unwrap();
         let mut again = Esp::new(esp.c.dev, |_| Ok(())).unwrap();
         assert_eq!(again.tries().unwrap(), Some(Tries { left: 0, total: 3 }));
