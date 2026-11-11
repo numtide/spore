@@ -5,6 +5,11 @@
 set -eu
 export MTOOLS_SKIP_CHECK=1
 
+# the stamp first: it marks the moment the boot is good, before the ESP work
+if command -v spore >/dev/null 2>&1; then
+  echo "boot good at $(spore stamp)"
+fi
+
 esp=$(findfs LABEL=ESP)
 mnt=
 while read -r dev dir _; do
@@ -31,10 +36,6 @@ elif [ "$1" != "$2" ]; then
     sync
   fi
   echo "boot good: $2 of $2 tries left"
-fi
-
-if command -v spore >/dev/null 2>&1; then
-  echo "boot good at $(spore stamp)"
 fi
 
 for w in /sys/class/watchdog/watchdog*; do
