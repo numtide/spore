@@ -149,6 +149,8 @@
       "systemd-tpm2-clear.service"
       "systemd-tpm2-setup-early.service"
       "systemd-tpm2-setup.service"
+      # keeps DHCP leases under /var/lib/systemd/network: 100 ms on the way to network.target
+      "systemd-networkd-persistent-storage.service"
     ];
     users.manageLingering = false;
     boot.kexec.enable = false;
