@@ -10,6 +10,7 @@
 # system). SPORE_CLOSURE is the store path of the system's closureInfo (the
 # flake's <platform>-target-closure). SPORE_EXTRA names a script to run on
 # the target after the warm boot; its output lands in OUTDIR/extra.
+# SPORE_EXTRA_DIR is copied to /var/tmp/extra on the target first.
 set -euo pipefail
 
 ami=$1
@@ -111,6 +112,12 @@ done
 awk '/kexec into \/nix/ { n++ } n >= 1 && /spore:/' "$out/warm.console" | tail -n +2 >"$out/warm.spore"
 
 if [ -n "${SPORE_EXTRA:-}" ]; then
+  if [ -n "${SPORE_EXTRA_DIR:-}" ]; then
+    # one file per ssh: the lean target has neither tar nor scp
+    for f in "$SPORE_EXTRA_DIR"/*; do
+      "${ssh[@]}" "mkdir -p /var/tmp/extra && cat >/var/tmp/extra/$(basename "$f")" <"$f"
+    done
+  fi
   "${ssh[@]}" 'cat >/tmp/extra.sh && bash /tmp/extra.sh' <"$SPORE_EXTRA" >"$out/extra" 2>&1 || true
 fi
 

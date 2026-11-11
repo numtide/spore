@@ -373,7 +373,12 @@ fn target_layout(
 
 /// Pulls the closure of `system` into `root` and registers it. Returns the number of
 /// paths added and their NAR bytes.
-fn pull(root: &Path, roots: &[StorePath], f: &fetch::Fetcher) -> Result<(usize, u64), String> {
+fn pull(
+    root: &Path,
+    roots: &[StorePath],
+    f: &fetch::Fetcher,
+    done: &(dyn Fn(&StorePath) + Sync),
+) -> Result<(usize, u64), String> {
     let mut db = db::open(root)?;
     let valid: HashSet<String> = {
         let mut q = db
@@ -384,7 +389,7 @@ fn pull(root: &Path, roots: &[StorePath], f: &fetch::Fetcher) -> Result<(usize, 
             .collect::<Result<_, _>>()
             .map_err(|e| e.to_string())?
     };
-    let (infos, bytes) = f.pull(roots, &valid, JOBS)?;
+    let (infos, bytes) = f.pull(roots, &valid, JOBS, done)?;
     db::register(&mut db, &infos)?;
     Ok((infos.len(), bytes))
 }
@@ -586,10 +591,18 @@ fn run(t0: Instant, c0: u64, a: &Args, net_up: &mut bool, failed: bool) -> Resul
     let (kernel_path, kernel) =
         boot_file(&top, root, "kernel")?.ok_or("the system has no kernel")?;
     let initrd = boot_file(&top, root, "initrd")?;
-    let mut first = vec![kernel_path];
-    first.extend(initrd.iter().map(|(p, _)| p.clone()));
-    let (n0, bytes0) = pull(root, &first, &f)?;
-    log!("kernel and initrd fetched after {} s", s());
+    // the two go first in the queue; the ESP writer starts when both have landed
+    let mut roots = vec![kernel_path];
+    roots.extend(initrd.iter().map(|(p, _)| p.clone()));
+    let need = std::sync::Mutex::new(roots.iter().map(|p| p.to_string()).collect::<HashSet<_>>());
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let landed = move |p: &StorePath| {
+        let mut n = need.lock().unwrap();
+        if n.remove(&p.to_string()) && n.is_empty() {
+            log!("kernel and initrd fetched after {} s", s());
+            let _ = tx.send(());
+        }
+    };
 
     let mut params = fs::read_to_string(top.join("kernel-params")).unwrap_or_default();
     if initrd.is_none() {
@@ -607,6 +620,8 @@ fn run(t0: Instant, c0: u64, a: &Args, net_up: &mut bool, failed: bool) -> Resul
             cmdline.clone(),
         );
         std::thread::spawn(move || -> Result<u128, String> {
+            rx.recv()
+                .map_err(|_| "the fetch ended before the kernel landed".to_string())?;
             let t = Instant::now();
             esp::Esp::open(&esp)?
                 .write_target_files(&esp::Target {
@@ -621,7 +636,7 @@ fn run(t0: Instant, c0: u64, a: &Args, net_up: &mut bool, failed: bool) -> Resul
 
     // with the closure list, every narinfo is asked for at once: the reference
     // graph of a NixOS system is 7 levels deep, one round trip each otherwise
-    let mut roots = vec![system.clone()];
+    roots.push(system.clone());
     if let Some(c) = &ud.closure {
         let t = Instant::now();
         roots.extend(closure_list(&f, c, ram)?);
@@ -631,13 +646,13 @@ fn run(t0: Instant, c0: u64, a: &Args, net_up: &mut bool, failed: bool) -> Resul
             t.elapsed().as_millis()
         );
     }
-    let (n, bytes) = pull(root, &roots, &f)?;
+    let (n, bytes) = pull(root, &roots, &f, &landed)?;
     let (user, sys_cpu) = cpu_seconds();
     log!(
         "fetched {system} after {} s: {} paths, {} MiB; cpu user {user:.2} s, sys {sys_cpu:.2} s",
         s(),
-        n + n0,
-        (bytes + bytes0) >> 20
+        n,
+        bytes >> 20
     );
 
     let profiles = root.join("nix/var/nix/profiles");
@@ -695,7 +710,7 @@ fn main() {
             .and_then(|s| UserData::parse(&s))
             .and_then(|ud| {
                 let (system, f) = fetcher(&ud, Path::new(root))?;
-                pull(Path::new(root), std::slice::from_ref(&system), &f)
+                pull(Path::new(root), std::slice::from_ref(&system), &f, &|_| {})
                     .map(|(n, b)| (system, n, b))
             });
         match r {

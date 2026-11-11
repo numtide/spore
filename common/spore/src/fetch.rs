@@ -141,17 +141,21 @@ impl Fetcher {
     }
 
     /// Pulls the closure of `roots` into the store, skipping `valid` paths (their closures
-    /// are complete). Returns the narinfo of every path it added.
+    /// are complete). Returns the narinfo of every path it added. `done` hears of every
+    /// root as it lands, or at once when it is valid already.
     pub fn pull(
         &self,
         roots: &[StorePath],
         valid: &HashSet<String>,
         jobs: usize,
+        done: &(dyn Fn(&StorePath) + Sync),
     ) -> Result<(Vec<NarInfo>, u64), String> {
         fs::create_dir_all(&self.store).map_err(|e| format!("{}: {e}", self.store.display()))?;
         let mut st = State::default();
         for r in roots {
-            if st.seen.insert(r.clone()) && !valid.contains(&r.to_string()) {
+            if valid.contains(&r.to_string()) {
+                done(r);
+            } else if st.seen.insert(r.clone()) {
                 st.infos.push_back(r.clone());
                 st.pending += 1;
             }
@@ -160,7 +164,7 @@ impl Fetcher {
         let cv = Condvar::new();
         std::thread::scope(|s| {
             for _ in 0..jobs.max(1) {
-                s.spawn(|| self.worker(&state, &cv, valid));
+                s.spawn(|| self.worker(&state, &cv, valid, done));
             }
         });
         let st = state.into_inner().unwrap();
@@ -170,7 +174,13 @@ impl Fetcher {
         }
     }
 
-    fn worker(&self, state: &Mutex<State>, cv: &Condvar, valid: &HashSet<String>) {
+    fn worker(
+        &self,
+        state: &Mutex<State>,
+        cv: &Condvar,
+        valid: &HashSet<String>,
+        done: &(dyn Fn(&StorePath) + Sync),
+    ) {
         enum Task {
             Info(StorePath),
             Nar(String, NarInfo),
@@ -183,11 +193,13 @@ impl Fetcher {
                         cv.notify_all();
                         return;
                     }
-                    if let Some(p) = st.infos.pop_front() {
-                        break Task::Info(p);
-                    }
+                    // a download before the next narinfo: the bytes start to flow
+                    // while the graph is still being discovered
                     if let Some((sub, ni)) = st.nars.pop_front() {
                         break Task::Nar(sub, ni);
+                    }
+                    if let Some(p) = st.infos.pop_front() {
+                        break Task::Info(p);
                     }
                     st = cv.wait(st).unwrap();
                 }
@@ -206,10 +218,13 @@ impl Fetcher {
                 Task::Nar(sub, ni) => {
                     let r = retry(3, || self.nar(&sub, &ni, &self.store));
                     r.map(|_| {
+                        let path = ni.path.clone();
                         let mut st = state.lock().unwrap();
                         st.pending -= 1;
                         st.bytes += ni.nar_size;
                         st.done.push(ni);
+                        drop(st);
+                        done(&path);
                     })
                 }
             };
