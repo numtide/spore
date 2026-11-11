@@ -486,6 +486,14 @@ build that systemd already brings, 28 MiB less in the closure.
   was slower than Limine's linux protocol, which enters the kernel without
   the EFI stub. So the x86_64 release disk uses the linux entry on both
   firmwares.
+- **ext4 without a journal, unless the layout says `Journal=yes`.** A
+  journaled ext4 reads about 7 blocks per block group on every mount:
+  470 reads and 280 ms for 8 GiB on a cold EBS volume, 18 ms without the
+  journal. No mount option or feature flag changes that, only the
+  journal's absence. The bootstrap pays it once and the target's root
+  mount pays it again on every boot. A target that a crash leaves
+  inconsistent is provisioned again; `Journal=` is a spore key, not a
+  repart.d one.
 - **mke2fs runs with `-E nodiscard`.** By default, mke2fs discards the
   whole new partition. That cost 1.3–1.8 s on cax. A disk made from a
   sparse snapshot gets nothing from the discard.
