@@ -27,7 +27,18 @@ in
     '';
   };
 
+  options.spore.bootGood.stamp = lib.mkOption {
+    type = lib.types.nullOr lib.types.package;
+    default = null;
+    description = ''
+      The spore package. With it, the good line carries the time since the
+      reset of the machine (`spore stamp`): the clock of the "reset+" times
+      in the bootstrap log, so the two add up to one boot.
+    '';
+  };
+
   config = {
+    environment.systemPackages = lib.optional (cfg.stamp != null) cfg.stamp;
     systemd.services.spore-boot-good = {
       description = "Mark the boot good for the spore bootstrap";
       wantedBy = [ "multi-user.target" ];
@@ -36,7 +47,8 @@ in
       path = [
         pkgs.mtools
         pkgs.util-linux
-      ];
+      ]
+      ++ lib.optional (cfg.stamp != null) cfg.stamp;
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;

@@ -33,6 +33,10 @@ elif [ "$1" != "$2" ]; then
   echo "boot good: $2 of $2 tries left"
 fi
 
+if command -v spore >/dev/null 2>&1; then
+  echo "boot good at $(spore stamp)"
+fi
+
 for w in /sys/class/watchdog/watchdog*; do
   if [ "$(cat "$w/identity" 2>/dev/null)" = "Software Watchdog" ]; then
     # the magic close character stops it

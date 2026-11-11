@@ -39,6 +39,7 @@ rec {
     (pkgs.nixos {
       imports = [ ../../targets/aws ];
       boot.kernelPackages = pkgs.linuxPackagesFor kernel;
+      spore.bootGood.stamp = common.spore;
     }).config.system.build.toplevel;
   # TCG: the arm builders have no /dev/kvm
   test = {
