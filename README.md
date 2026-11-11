@@ -280,11 +280,9 @@ boots were healthy.
 | Hang in the kernel, the initrd or the boot | `boot-good.nix` arms the software watchdog: `softdog.soft_active_on_boot=1 softdog.soft_margin=DEADLINE` (`spore.bootGood.deadline`, default 300 s). The good script stops it with the magic close character. Without that stop, softdog resets the machine at the deadline. |
 | The target boots, but the good unit fails or never runs | The try stays taken. With the module, softdog resets the machine at the deadline. Without the module, the next reset from outside counts. |
 
-The x86_64 platform kernel has softdog built in. A stock NixOS kernel has
-it as a module, and `boot-good.nix` loads it in the initrd. A hang before
-the softdog driver starts (early in the kernel) is not caught. The aarch64
-kernel has no softdog yet, so its target sets the deadline to null. There,
-a hang waits for a reset from outside.
+The platform kernels have softdog built in. A stock NixOS kernel has it
+as a module, and `boot-good.nix` loads it in the initrd. A hang before the
+softdog driver starts (early in the kernel) is not caught.
 
 `nix flake check` runs these lanes, each on every firmware of the platform:
 

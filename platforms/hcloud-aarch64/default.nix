@@ -39,8 +39,6 @@ rec {
     (pkgs.nixos {
       imports = [ ../../targets/hcloud ];
       boot.kernelPackages = pkgs.linuxPackagesFor kernel;
-      # the kernel has no softdog yet: its kernel.config needs a native build
-      spore.bootGood.deadline = null;
     }).config.system.build.toplevel;
   # TCG: the arm builders have no /dev/kvm
   test = {

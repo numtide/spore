@@ -58,6 +58,8 @@
     "WATCHDOG"
     "WATCHDOG_SYSFS"
     "SOFT_WATCHDOG"
+    "SOFTLOCKUP_DETECTOR"
+    "DETECT_HUNG_TASK"
   ];
   disable = [
     "DRM"
@@ -97,4 +99,7 @@
     "SUSPEND"
     "PM_SLEEP"
   ];
+  set = {
+    LOG_BUF_SHIFT = "20";
+  };
 }
