@@ -610,8 +610,6 @@ fn run(t0: Instant, c0: u64, a: &Args, net_up: &mut bool, failed: bool) -> Resul
     }
     let cmdline = target_cmdline(&sys, &params);
     let initrd = initrd.map(|(_, p)| p);
-    let size = |p: &Path| fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-    let mib = (size(&kernel) + initrd.as_deref().map(size).unwrap_or(0)) >> 20;
     let writer = {
         let (esp, kernel, initrd, cmdline) = (
             prep.esp.clone(),
@@ -619,7 +617,7 @@ fn run(t0: Instant, c0: u64, a: &Args, net_up: &mut bool, failed: bool) -> Resul
             initrd.clone(),
             cmdline.clone(),
         );
-        std::thread::spawn(move || -> Result<u128, String> {
+        std::thread::spawn(move || -> Result<(u64, u128), String> {
             rx.recv()
                 .map_err(|_| "the fetch ended before the kernel landed".to_string())?;
             let t = Instant::now();
@@ -630,7 +628,9 @@ fn run(t0: Instant, c0: u64, a: &Args, net_up: &mut bool, failed: bool) -> Resul
                     cmdline: &cmdline,
                 })
                 .map_err(|e| format!("ESP {}: {e}", esp.display()))?;
-            Ok(t.elapsed().as_millis())
+            let size = |p: &Path| fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            let mib = (size(&kernel) + initrd.as_deref().map(size).unwrap_or(0)) >> 20;
+            Ok((mib, t.elapsed().as_millis()))
         })
     };
 
@@ -660,7 +660,7 @@ fn run(t0: Instant, c0: u64, a: &Args, net_up: &mut bool, failed: bool) -> Resul
     link(&sys, &profiles.join("system-1-link"))?;
     link("system-1-link", &profiles.join("system"))?;
 
-    let ms = writer.join().map_err(|_| "the ESP writer panicked")??;
+    let (mib, ms) = writer.join().map_err(|_| "the ESP writer panicked")??;
     let total = ud.boot_tries;
     esp::Esp::open(&prep.esp)?
         .set_tries(Tries {
