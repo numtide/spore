@@ -284,8 +284,12 @@ impl Layout {
         }
     }
 
-    /// The user-data `layout`: `{"wipe": bool, "partitions": [{...}, ...]}`.
+    /// The user-data `layout`: `{"wipe": bool, "partitions": [{...}, ...]}`, or the
+    /// string `"default"` for the default convention without the lookup in the system.
     pub fn from_json(v: &serde_json::Value) -> Result<Layout, String> {
+        if v.as_str() == Some("default") {
+            return Ok(Layout::default_convention());
+        }
         let wipe = v.get("wipe").and_then(|w| w.as_bool()).unwrap_or(false);
         let parts = v
             .get("partitions")

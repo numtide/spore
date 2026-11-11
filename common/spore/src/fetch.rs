@@ -46,7 +46,8 @@ impl Fetcher {
     pub fn new(substituters: Vec<String>, keys: Vec<PublicKey>, store: PathBuf) -> Fetcher {
         let agent = ureq::AgentBuilder::new()
             .max_idle_connections(256)
-            .max_idle_connections_per_host(64)
+            // at least as many as the workers, or they open a connection per request
+            .max_idle_connections_per_host(128)
             .timeout_connect(Duration::from_secs(10))
             .timeout_read(Duration::from_secs(60))
             .user_agent("spore")

@@ -12,6 +12,10 @@ pub struct UserData {
     pub trusted_public_keys: Vec<String>,
     /// repart definitions; see Layout::from_json.
     pub layout: Option<serde_json::Value>,
+    /// A store path with a `store-paths` file: the closure of the system, one path
+    /// per line (nixpkgs' closureInfo). With it the bootstrap asks for every
+    /// narinfo at once instead of walking the references level by level.
+    pub closure: Option<String>,
     /// Boots of the target without a good mark before the bootstrap takes over.
     pub boot_tries: u8,
     pub fallback: Fallback,
@@ -43,6 +47,8 @@ struct Section {
     trusted_public_keys: Vec<String>,
     #[serde(default)]
     layout: Option<serde_json::Value>,
+    #[serde(default)]
+    closure: Option<String>,
     #[serde(default = "default_tries")]
     boot_tries: u8,
     #[serde(default)]
@@ -95,6 +101,7 @@ impl UserData {
             substituters: u.substituters,
             trusted_public_keys: u.trusted_public_keys,
             layout: u.layout,
+            closure: u.closure,
             boot_tries: u.boot_tries,
             fallback: u.fallback,
         })

@@ -173,13 +173,16 @@ keys.
 | `trusted-public-keys` | required      | The keys that must sign the closure |
 | `boot-tries`          | `3`           | Boots of the system without a good mark, 1 to 9 |
 | `fallback`            | `"provision"` | With no tries left: `"provision"` again, or `"rescue"`: stay in the bootstrap, the disk stays as it is |
-| `layout`              | none          | The partition layout; see "Partition layout" |
+| `layout`              | none          | The partition layout; see "Partition layout". `"default"` takes the default convention without the lookup in the system, two round trips to the cache less |
+| `closure`             | none          | A store path with a `store-paths` file, the closure of the system (nixpkgs' `closureInfo`; the flake exports `<platform>-target-closure`). The bootstrap then asks for every narinfo at once instead of walking the references level by level |
 
 An unknown key inside `spore` is an error, so a typo does not pass as a
 default.
 
-The system must contain `kernel`, `initrd`, `init` and `kernel-params`. A
-NixOS toplevel has all four. The system must mount its root by label `nixos`.
+The system must contain `kernel`, `init` and `kernel-params`, and `initrd`
+if it boots through one. A NixOS toplevel has all of them. Without an
+`initrd` link the bootstrap passes `root=PARTLABEL=…` for the `/`
+partition of the layout, and the kernel mounts the root itself.
 
 ## First boot
 

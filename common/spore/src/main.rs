@@ -389,6 +389,22 @@ fn pull(root: &Path, roots: &[StorePath], f: &fetch::Fetcher) -> Result<(usize, 
     Ok((infos.len(), bytes))
 }
 
+/// The store paths in the `store-paths` file of `closure`, fetched into `ram`.
+fn closure_list(f: &fetch::Fetcher, closure: &str, ram: &Path) -> Result<Vec<StorePath>, String> {
+    let sp = StorePath::parse(closure).map_err(|e| e.0)?;
+    let dir = ram.join(closure.trim_start_matches('/'));
+    if !dir.exists() {
+        f.fetch_one(&sp, &ram.join("nix/store"))?;
+    }
+    let list = fs::read_to_string(dir.join("store-paths"))
+        .map_err(|e| format!("{}/store-paths: {e}", closure))?;
+    list.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(|l| StorePath::parse(l).map_err(|e| e.0))
+        .collect()
+}
+
 /// The store path behind the `kernel` or `initrd` link of the system at `top`, and
 /// where that file is under `root`. None when the system has no such link.
 fn boot_file(top: &Path, root: &Path, name: &str) -> Result<Option<(StorePath, PathBuf)>, String> {
@@ -603,7 +619,19 @@ fn run(t0: Instant, c0: u64, a: &Args, net_up: &mut bool, failed: bool) -> Resul
         })
     };
 
-    let (n, bytes) = pull(root, std::slice::from_ref(&system), &f)?;
+    // with the closure list, every narinfo is asked for at once: the reference
+    // graph of a NixOS system is 7 levels deep, one round trip each otherwise
+    let mut roots = vec![system.clone()];
+    if let Some(c) = &ud.closure {
+        let t = Instant::now();
+        roots.extend(closure_list(&f, c, ram)?);
+        log!(
+            "closure list: {} paths, read in {} ms",
+            roots.len() - 1,
+            t.elapsed().as_millis()
+        );
+    }
+    let (n, bytes) = pull(root, &roots, &f)?;
     let (user, sys_cpu) = cpu_seconds();
     log!(
         "fetched {system} after {} s: {} paths, {} MiB; cpu user {user:.2} s, sys {sys_cpu:.2} s",

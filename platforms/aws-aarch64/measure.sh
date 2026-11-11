@@ -7,8 +7,9 @@
 # SPORE_KEY (an EC2 key pair whose private key ssh offers by default).
 # SPORE_MARKET=on-demand switches off the spot request. SPORE_LAYOUT is a
 # JSON layout for the user-data (the bootstrap then skips the lookup in the
-# system). SPORE_EXTRA names a script to run on the target after the warm
-# boot; its output lands in OUTDIR/extra.
+# system). SPORE_CLOSURE is the store path of the system's closureInfo (the
+# flake's <platform>-target-closure). SPORE_EXTRA names a script to run on
+# the target after the warm boot; its output lands in OUTDIR/extra.
 set -euo pipefail
 
 ami=$1
@@ -20,9 +21,13 @@ mkdir -p "$out"
 
 ud=$(mktemp)
 trap 'rm -f "$ud"' EXIT
+# optional keys as whole lines: a heredoc strips the quotes inside ${var:+...}
+layout_line=${SPORE_LAYOUT:+"\"layout\": $SPORE_LAYOUT,"}
+closure_line=${SPORE_CLOSURE:+"\"closure\": \"$SPORE_CLOSURE\","}
 cat >"$ud" <<JSON
 {"spore": {"version": 1, "system": "$system",
-  ${SPORE_LAYOUT:+"layout": $SPORE_LAYOUT,}
+  $layout_line
+  $closure_line
   "substituters": ["${SPORE_SUBSTITUTER:-https://cache.numtide.com}"],
   "trusted-public-keys": ["${SPORE_KEY_PUB:-niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=}"]}}
 JSON
