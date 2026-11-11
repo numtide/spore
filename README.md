@@ -593,30 +593,40 @@ with no retries.
 
 t4g.small (2 vCPU, Graviton2), eu-central-1, 8 GiB gp3 root volume with
 the default 125 MiB/s, AMI from `aws-disk`, the lean target without
-initrd, closure from cache.numtide.com. Times from the reset of the
-machine, which on a VM is the start of the instance. One run each, from
-`measure.sh`; the launch API call comes 5 to 6 s before the reset.
+initrd, user-data with `"layout": "default"` and the closure list, closure
+from cache.numtide.com. Times from the reset of the machine, which on a
+VM is the start of the instance. One run each, from `measure.sh`; the
+launch API call comes 5 to 6 s before the reset.
 
 | Step | First boot | Warm reboot |
 | ---- | ---------- | ----------- |
-| /init | 1.28 s | 1.23 s |
-| Layout read from the system | 1.78 s | |
-| Disk ready | 2.06 s | |
-| Kernel and initrd fetched | 2.4 s | |
-| Closure fetched, 277 paths, 289 MiB | 4.31 s | |
-| Boot entry armed | 4.38 s | |
-| kexec | 4.39 s | 1.36 s |
-| Boot good on the target | 6.56 s | 3.48 s |
-| ssh answers, after the launch call | 12.3 s | 5.5 s |
+| /init | 1.29 s | 1.28 s |
+| Disk ready | 1.40 s | |
+| Closure fetched, 277 paths, 290 MiB | 3.55 s | |
+| kexec | 4.13 s | 1.41 s |
+| Boot good on the target | 5.75 s | 3.08 s |
+| ssh answers, after the launch call | 11.1 s | 5.5 s |
+
+On a c7g.metal (64 cores, 128 GiB) the bootstrap takes the same path in
+2.78 s from /init to the kexec, the target reaches multi-user in 1.6 s,
+and `/dev/kvm` is there. The firmware of a metal host takes minutes
+before the kernel, on a launch and on every reboot, and is not in these
+numbers.
 
 Before this round of measurements the first boot was good at 10.1 s and
 the warm reboot at 4.7 s. What moved it: the ESP chunk cache no longer
 reads the blocks it overwrites (the snapshot still holds them on S3), the
 ESP is written while the closure downloads, writeback starts during the
 fetch instead of in the sync before the kexec, the target has no initrd,
-and PID 1 skips the first-boot preset run. A gp3 volume at 1000 MiB/s
-changes none of the remaining steps but the sync and the ESP write, so
-the rest is CPU, network latency and systemd.
+PID 1 skips the first-boot preset run, ext4 has no journal (280 ms per
+mount on a cold EBS volume, paid by the bootstrap and again by the
+target), the layout and the closure list come from the user-data, and the
+bootstrap kernel maps 2 GiB instead of the whole machine (`kexec_file_load`
+copied the linear map of the c7g.metal for 12.3 s). A gp3 volume at
+1000 MiB/s changes none of the remaining steps but the sync and the ESP
+write. The fetch is bound by the cache edge: cache.numtide.com answered
+every request from the origin during these runs, and the same 290 MiB take
+1.3 s once the edge holds them.
 
 ### Boot-count fallback
 
