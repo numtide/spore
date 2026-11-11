@@ -145,6 +145,15 @@ fn rate_from_log(log: &str) -> Option<f64> {
     })
 }
 
+/// User and system CPU time of this process so far, in seconds: whether the fetch is
+/// bound by the CPUs or by the network shows here.
+fn cpu_seconds() -> (f64, f64) {
+    let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) };
+    let f = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 / 1e6;
+    (f(ru.ru_utime), f(ru.ru_stime))
+}
+
 /// The peak resident set of this process (VmHWM) in MiB.
 fn peak_mib() -> f64 {
     let kib: u64 = fs::read_to_string("/proc/self/status")
@@ -595,8 +604,9 @@ fn run(t0: Instant, c0: u64, a: &Args, net_up: &mut bool, failed: bool) -> Resul
     };
 
     let (n, bytes) = pull(root, std::slice::from_ref(&system), &f)?;
+    let (user, sys_cpu) = cpu_seconds();
     log!(
-        "fetched {system} after {} s: {} paths, {} MiB",
+        "fetched {system} after {} s: {} paths, {} MiB; cpu user {user:.2} s, sys {sys_cpu:.2} s",
         s(),
         n + n0,
         (bytes + bytes0) >> 20
