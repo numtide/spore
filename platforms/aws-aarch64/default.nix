@@ -23,10 +23,15 @@ rec {
   };
   # the EBS volume is longer than the image; the bootstrap moves the backup
   # GPT to its end on the first boot
+  # arm64 kexec copies the linear map for its relocation code, one entry per
+  # 4 KiB page with a barrier each: 12.3 s for the 128 GiB of a c7g.metal
+  # (perf: 97 % in trans_pgd_create_copy), 6 ms for the 2 GiB of a t4g.small.
+  # The bootstrap needs no more than 2 GiB; the target gets its own command
+  # line and all the memory.
   linuxDisk = common.disk {
     inherit kernel initrd;
     # the ACPI SPCR table does not make ttyS0 the console by itself
-    cmdline = "quiet console=ttyS0,115200n8";
+    cmdline = "quiet console=ttyS0,115200n8 mem=2G";
   };
   ukiDisk = linuxDisk.override {
     uki = true;
