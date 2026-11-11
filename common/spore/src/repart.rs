@@ -30,6 +30,11 @@ pub struct Partition {
     pub padding_weight: u64,
     /// MountPoint=: where the bootstrap mounts it below /mnt.
     pub mount: Option<String>,
+    /// Journal=, a spore key, off by default: a journaled ext4 reads about 7 blocks per
+    /// block group on every mount (280 ms for 8 GiB on a cold EBS volume), paid by the
+    /// bootstrap and again by the target. A target that a crash leaves inconsistent is
+    /// provisioned again.
+    pub journal: bool,
     /// Keys that change what a new partition holds, which this does not do yet
     /// (Encrypt=, CopyFiles=, ...). They matter only when the partition is created.
     pub unsupported: Vec<String>,
@@ -50,6 +55,7 @@ impl Partition {
             padding_max: None,
             padding_weight: 0,
             mount: None,
+            journal: false,
             unsupported: Vec::new(),
         })
     }
@@ -91,6 +97,13 @@ impl Partition {
             "Label" => self.label = Some(v.to_string()),
             "UUID" => self.uuid = Some(Guid::try_parse(v).ok_or_else(bad)?),
             "Format" => self.format = Some(v.to_string()),
+            "Journal" => {
+                self.journal = match v {
+                    "1" | "yes" | "true" | "on" => true,
+                    "0" | "no" | "false" | "off" => false,
+                    _ => return Err(bad()),
+                }
+            }
             "SizeMinBytes" => self.size_min = Some(parse_size(v).ok_or_else(bad)?),
             "SizeMaxBytes" => self.size_max = Some(parse_size(v).ok_or_else(bad)?),
             "PaddingMinBytes" => self.padding_min = parse_size(v).ok_or_else(bad)?,
@@ -271,8 +284,12 @@ impl Layout {
         }
     }
 
-    /// The user-data `layout`: `{"wipe": bool, "partitions": [{...}, ...]}`.
+    /// The user-data `layout`: `{"wipe": bool, "partitions": [{...}, ...]}`, or the
+    /// string `"default"` for the default convention without the lookup in the system.
     pub fn from_json(v: &serde_json::Value) -> Result<Layout, String> {
+        if v.as_str() == Some("default") {
+            return Ok(Layout::default_convention());
+        }
         let wipe = v.get("wipe").and_then(|w| w.as_bool()).unwrap_or(false);
         let parts = v
             .get("partitions")
@@ -363,6 +380,11 @@ mod tests {
         };
         assert_eq!(p.type_guid, type_guid(native).unwrap());
         assert_eq!(p.label.as_deref(), Some("nixos"));
+        assert!(!p.journal);
+        let mut j = Partition::new("linux-generic").unwrap();
+        j.set("Journal", "yes").unwrap();
+        assert!(j.journal);
+        assert!(j.set("Journal", "maybe").is_err());
         assert_eq!(p.size_min, Some(2 << 30));
         assert_eq!(p.weight, 500);
         assert_eq!(p.mount.as_deref(), Some("/"));

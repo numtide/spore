@@ -9,7 +9,7 @@ use std::path::Path;
 
 pub struct Target<'a> {
     pub kernel: &'a Path,
-    pub initrd: &'a Path,
+    pub initrd: Option<&'a Path>,
     pub cmdline: &'a str,
 }
 
@@ -119,9 +119,9 @@ impl<D: Read + Write + Seek> Esp<D> {
         self.commit()
     }
 
-    /// Writes the target files, then `tries`. The old counter goes first, so a target
-    /// with files from two systems never starts.
-    pub fn write_target(&mut self, t: &Target<'_>, tries: Tries) -> io::Result<()> {
+    /// Writes the target files. The old counter goes first, so a target with files
+    /// from two systems never starts; `set_tries` arms the new one.
+    pub fn write_target_files(&mut self, t: &Target<'_>) -> io::Result<()> {
         self.with(|root| match root.create_dir("target")?.remove("tries") {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
@@ -130,36 +130,61 @@ impl<D: Read + Write + Seek> Esp<D> {
         self.with(|root| {
             let dir = root.open_dir("target")?;
             copy_in(&dir, "kernel", t.kernel)?;
-            copy_in(&dir, "initrd", t.initrd)?;
+            match t.initrd {
+                Some(i) => copy_in(&dir, "initrd", i)?,
+                None => match dir.remove("initrd") {
+                    Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                    _ => {}
+                },
+            }
             write_small(&dir, "cmdline", t.cmdline.as_bytes())
         })?;
-        self.commit()?;
-        self.set_tries(tries)
+        self.commit()
     }
 
     /// Copies the target kernel and initrd to `out/kernel` and `out/initrd`; returns the
-    /// command line.
-    pub fn read_target(&mut self, out: &Path) -> io::Result<String> {
+    /// command line and whether there is an initrd.
+    pub fn read_target(&mut self, out: &Path) -> io::Result<(String, bool)> {
         self.with(|root| {
             let dir = root.open_dir("target")?;
-            for n in ["kernel", "initrd"] {
-                io::copy(&mut dir.open_file(n)?, &mut File::create(out.join(n))?)?;
-            }
-            Ok(read_small(&dir, "cmdline")?.trim().to_string())
+            io::copy(
+                &mut dir.open_file("kernel")?,
+                &mut File::create(out.join("kernel"))?,
+            )?;
+            let initrd = match dir.open_file("initrd") {
+                Ok(mut f) => {
+                    io::copy(&mut f, &mut File::create(out.join("initrd"))?)?;
+                    true
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+                Err(e) => return Err(e),
+            };
+            Ok((read_small(&dir, "cmdline")?.trim().to_string(), initrd))
         })
     }
 }
 
 const CHUNK: u64 = 1024 * 1024;
+const SECTOR: usize = 512;
 
-/// fatfs does sector-sized I/O. On a network disk each write into an uncached page
-/// costs a synchronous read (3.8 s for a NixOS kernel and initrd on hcloud cx23), so
-/// whole chunks are read once and written back once.
+/// fatfs does sector-sized I/O, and on a network disk each write into an uncached page
+/// costs a synchronous read (3.8 s for a kernel and initrd on hcloud cx23), so whole
+/// chunks are written back once. Only the sectors a write leaves alone are read: on a
+/// fresh EBS volume a block the snapshot still holds on S3 costs more to read than to
+/// write.
 pub struct ChunkCache<D> {
     dev: D,
     len: u64,
     pos: u64,
-    chunks: std::collections::BTreeMap<u64, (Vec<u8>, bool)>,
+    chunks: std::collections::BTreeMap<u64, Chunk>,
+}
+
+struct Chunk {
+    buf: Vec<u8>,
+    dirty: bool,
+    /// the disk contents fill the sectors that are not written
+    loaded: bool,
+    written: Vec<bool>,
 }
 
 impl<D: Read + Write + Seek> ChunkCache<D> {
@@ -173,29 +198,61 @@ impl<D: Read + Write + Seek> ChunkCache<D> {
         })
     }
 
-    fn chunk(&mut self, i: u64) -> io::Result<&mut (Vec<u8>, bool)> {
-        if !self.chunks.contains_key(&i) {
-            let n = CHUNK.min(self.len - i * CHUNK) as usize;
-            let mut b = vec![0u8; n];
-            self.dev.seek(io::SeekFrom::Start(i * CHUNK))?;
-            self.dev.read_exact(&mut b)?;
-            self.chunks.insert(i, (b, false));
+    fn chunk_len(&self, i: u64) -> usize {
+        CHUNK.min(self.len - i * CHUNK) as usize
+    }
+
+    fn chunk(&mut self, i: u64) -> &mut Chunk {
+        let n = self.chunk_len(i);
+        self.chunks.entry(i).or_insert_with(|| Chunk {
+            buf: vec![0u8; n],
+            dirty: false,
+            loaded: false,
+            written: vec![false; n.div_ceil(SECTOR)],
+        })
+    }
+
+    fn load(&mut self, i: u64) -> io::Result<()> {
+        if self.chunk(i).loaded {
+            return Ok(());
         }
-        Ok(self.chunks.get_mut(&i).unwrap())
+        let mut b = vec![0u8; self.chunk_len(i)];
+        self.dev.seek(io::SeekFrom::Start(i * CHUNK))?;
+        self.dev.read_exact(&mut b)?;
+        let c = self.chunk(i);
+        for (s, w) in c.written.iter().enumerate() {
+            if !w {
+                let r = s * SECTOR..((s + 1) * SECTOR).min(b.len());
+                c.buf[r.clone()].copy_from_slice(&b[r]);
+            }
+        }
+        c.loaded = true;
+        Ok(())
     }
 
     fn io(
         &mut self,
         len: usize,
-        mut f: impl FnMut(&mut (Vec<u8>, bool), usize, usize, usize),
+        write: bool,
+        mut f: impl FnMut(&mut [u8], usize),
     ) -> io::Result<usize> {
         let len = len.min(self.len.saturating_sub(self.pos) as usize);
         let mut done = 0;
         while done < len {
             let (i, off) = (self.pos / CHUNK, (self.pos % CHUNK) as usize);
-            let c = self.chunk(i)?;
-            let n = (c.0.len() - off).min(len - done);
-            f(c, off, done, n);
+            let n = (self.chunk_len(i) - off).min(len - done);
+            let whole = off % SECTOR == 0 && (n % SECTOR == 0 || off + n == self.chunk_len(i));
+            if !write || !whole {
+                self.load(i)?;
+            }
+            let c = self.chunk(i);
+            f(&mut c.buf[off..off + n], done);
+            if write {
+                c.dirty = true;
+                for s in off / SECTOR..(off + n).div_ceil(SECTOR) {
+                    c.written[s] = true;
+                }
+            }
             done += n;
             self.pos += n as u64;
         }
@@ -205,8 +262,8 @@ impl<D: Read + Write + Seek> ChunkCache<D> {
 
 impl<D: Read + Write + Seek> Read for ChunkCache<D> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.io(buf.len(), |c, off, done, n| {
-            buf[done..done + n].copy_from_slice(&c.0[off..off + n])
+        self.io(buf.len(), false, |c, done| {
+            buf[done..done + c.len()].copy_from_slice(c)
         })
     }
 }
@@ -219,19 +276,26 @@ impl<D: Read + Write + Seek> Write for ChunkCache<D> {
                 "write past the end of the ESP",
             ));
         }
-        self.io(buf.len(), |c, off, done, n| {
-            c.0[off..off + n].copy_from_slice(&buf[done..done + n]);
-            c.1 = true;
+        self.io(buf.len(), true, |c, done| {
+            c.copy_from_slice(&buf[done..done + c.len()])
         })
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        for (i, (b, dirty)) in self.chunks.iter_mut() {
-            if *dirty {
-                self.dev.seek(io::SeekFrom::Start(i * CHUNK))?;
-                self.dev.write_all(b)?;
-                *dirty = false;
+        let dirty: Vec<u64> = self
+            .chunks
+            .iter()
+            .filter(|(_, c)| c.dirty)
+            .map(|(i, _)| *i)
+            .collect();
+        for i in dirty {
+            if !self.chunks[&i].written.iter().all(|w| *w) {
+                self.load(i)?;
             }
+            let c = self.chunks.get_mut(&i).unwrap();
+            self.dev.seek(io::SeekFrom::Start(i * CHUNK))?;
+            self.dev.write_all(&c.buf)?;
+            c.dirty = false;
         }
         self.dev.flush()
     }
@@ -276,6 +340,66 @@ mod tests {
         }
     }
 
+    struct Counting<D> {
+        d: D,
+        reads: usize,
+    }
+    impl<D: Read> Read for Counting<D> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.reads += 1;
+            self.d.read(buf)
+        }
+    }
+    impl<D: Write> Write for Counting<D> {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.d.write(buf)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.d.flush()
+        }
+    }
+    impl<D: Seek> Seek for Counting<D> {
+        fn seek(&mut self, to: io::SeekFrom) -> io::Result<u64> {
+            self.d.seek(to)
+        }
+    }
+
+    #[test]
+    fn file_data_needs_no_read() {
+        let dir = std::env::temp_dir().join(format!("spore-esp-r-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let kernel: Vec<u8> = (0..12_000_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(dir.join("k"), &kernel).unwrap();
+        std::fs::write(dir.join("i"), b"initrd").unwrap();
+        let mut esp = Esp::new(
+            Counting {
+                d: image(),
+                reads: 0,
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+        let t = Target {
+            kernel: &dir.join("k"),
+            initrd: Some(&dir.join("i")),
+            cmdline: "init=/nix/store/x/init",
+        };
+        esp.write_target_files(&t).unwrap();
+        esp.set_tries(Tries { left: 2, total: 3 }).unwrap();
+        // the FAT, the directories and the partial chunks at the ends of the file; a
+        // read per data chunk would be 12 more
+        assert!(esp.c.dev.reads <= 5, "{} reads", esp.c.dev.reads);
+        let out = dir.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        assert!(esp.read_target(&out).unwrap().1);
+        assert!(std::fs::read(out.join("kernel")).unwrap() == kernel);
+        let mut again = Esp::new(esp.c.dev, |_| Ok(())).unwrap();
+        assert_eq!(again.tries().unwrap(), Some(Tries { left: 2, total: 3 }));
+        again.read_target(&out).unwrap();
+        assert!(std::fs::read(out.join("kernel")).unwrap() == kernel);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn target_round_trip() {
         let dir = std::env::temp_dir().join(format!("spore-esp-{}", std::process::id()));
@@ -288,17 +412,35 @@ mod tests {
         for cmdline in ["init=/nix/store/x/init panic=10", "init=/nix/store/y/init"] {
             let t = Target {
                 kernel: &dir.join("k"),
-                initrd: &dir.join("i"),
+                initrd: Some(&dir.join("i")),
                 cmdline,
             };
-            esp.write_target(&t, Tries { left: 2, total: 3 }).unwrap();
+            esp.write_target_files(&t).unwrap();
+            esp.set_tries(Tries { left: 2, total: 3 }).unwrap();
             assert_eq!(esp.tries().unwrap(), Some(Tries { left: 2, total: 3 }));
             let out = dir.join("out");
             std::fs::create_dir_all(&out).unwrap();
-            assert_eq!(esp.read_target(&out).unwrap(), cmdline);
+            assert_eq!(esp.read_target(&out).unwrap(), (cmdline.to_string(), true));
             assert!(std::fs::read(out.join("kernel")).unwrap() == kernel);
             assert_eq!(std::fs::read(out.join("initrd")).unwrap(), b"initrd");
         }
+        let t = Target {
+            kernel: &dir.join("k"),
+            initrd: None,
+            cmdline: "init=/nix/store/z/init root=PARTLABEL=nixos",
+        };
+        esp.write_target_files(&t).unwrap();
+        esp.set_tries(Tries { left: 1, total: 3 }).unwrap();
+        let out = dir.join("out2");
+        std::fs::create_dir_all(&out).unwrap();
+        assert_eq!(
+            esp.read_target(&out).unwrap(),
+            (
+                "init=/nix/store/z/init root=PARTLABEL=nixos".to_string(),
+                false
+            )
+        );
+        assert!(!out.join("initrd").exists());
         esp.set_tries(Tries { left: 0, total: 3 }).unwrap();
         let mut again = Esp::new(esp.c.dev, |_| Ok(())).unwrap();
         assert_eq!(again.tries().unwrap(), Some(Tries { left: 0, total: 3 }));

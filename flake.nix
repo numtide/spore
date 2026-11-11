@@ -53,6 +53,8 @@
               target
               ;
             kernel-config = p.value.kernelConfig;
+            # for the user-data `closure` key
+            target-closure = p.pkgs.closureInfo { rootPaths = [ p.value.target ]; };
             initrd-debug = p.value.debugInitrd;
             disk-debug = p.value.debugDisk;
             disk-linux = p.value.linuxDisk;

@@ -369,7 +369,7 @@ fn zero_start(dev: &Path) -> Result<(), String> {
         .map_err(|e| format!("{}: {e}", dev.display()))
 }
 
-fn mkfs(fmt: Format, dev: &Path, label: &str) -> Result<(), String> {
+fn mkfs(fmt: Format, dev: &Path, label: &str, journal: bool) -> Result<(), String> {
     match fmt {
         Format::Ext4 => {
             let label: String = label.chars().take(16).collect();
@@ -378,6 +378,11 @@ fn mkfs(fmt: Format, dev: &Path, label: &str) -> Result<(), String> {
             let st = Command::new("/bin/mke2fs")
                 .args(["-q", "-F", "-t", "ext4", "-L", &label])
                 .args(["-E", "nodiscard,lazy_itable_init=1,lazy_journal_init=1"])
+                .args(if journal {
+                    &[][..]
+                } else {
+                    &["-O", "^has_journal"]
+                })
                 .arg(dev)
                 .status()
                 .map_err(|e| format!("/bin/mke2fs: {e}"))?;
@@ -449,7 +454,7 @@ pub fn prepare(layout: &Layout) -> Result<Prepared, String> {
         if new || blank(&dev) {
             match d.fs()? {
                 Some(fmt) => {
-                    mkfs(fmt, &dev, &label)?;
+                    mkfs(fmt, &dev, &label, d.journal)?;
                     log!(
                         "disk: {} appeared after {waited} ms, mkfs took {} ms",
                         dev.display(),

@@ -32,6 +32,7 @@ rec {
     (pkgs.nixos {
       imports = [ ../../targets/hcloud ];
       boot.kernelPackages = pkgs.linuxPackagesFor kernel;
+      spore.bootGood.stamp = common.spore;
     }).config.system.build.toplevel;
   test = {
     qemu = "qemu-system-x86_64 -enable-kvm -machine q35 -cpu host";

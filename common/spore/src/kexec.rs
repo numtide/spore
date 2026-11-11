@@ -10,10 +10,18 @@ const SYS_KEXEC_FILE_LOAD: libc::c_long = libc::SYS_kexec_file_load;
 #[cfg(target_arch = "aarch64")]
 const SYS_KEXEC_FILE_LOAD: libc::c_long = 294;
 
+const KEXEC_FILE_NO_INITRAMFS: libc::c_ulong = 0x4;
+
 /// Loads the next kernel with kexec_file_load(2); needs CONFIG_KEXEC_FILE.
-pub fn load(kernel: &Path, initrd: &Path, cmdline: &str) -> Result<(), String> {
+pub fn load(kernel: &Path, initrd: Option<&Path>, cmdline: &str) -> Result<(), String> {
     let k = File::open(kernel).map_err(|e| format!("{}: {e}", kernel.display()))?;
-    let i = File::open(initrd).map_err(|e| format!("{}: {e}", initrd.display()))?;
+    let i = initrd
+        .map(|p| File::open(p).map_err(|e| format!("{}: {e}", p.display())))
+        .transpose()?;
+    let (ifd, flags) = match &i {
+        Some(f) => (f.as_raw_fd(), 0),
+        None => (-1, KEXEC_FILE_NO_INITRAMFS),
+    };
     let c = CString::new(cmdline).map_err(|e| e.to_string())?;
     // the length counts the NUL: the kernel rejects a cmdline that does not end in one
     let len = c.as_bytes_with_nul().len();
@@ -21,10 +29,10 @@ pub fn load(kernel: &Path, initrd: &Path, cmdline: &str) -> Result<(), String> {
         libc::syscall(
             SYS_KEXEC_FILE_LOAD,
             k.as_raw_fd(),
-            i.as_raw_fd(),
+            ifd,
             len,
             c.as_ptr(),
-            0 as libc::c_ulong,
+            flags,
         )
     };
     if r != 0 {

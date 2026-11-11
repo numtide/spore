@@ -5,6 +5,11 @@
 set -eu
 export MTOOLS_SKIP_CHECK=1
 
+# before the ESP work: the stamp marks the moment the boot is good
+if command -v spore >/dev/null 2>&1; then
+  echo "boot good at $(spore stamp)"
+fi
+
 esp=$(findfs LABEL=ESP)
 mnt=
 while read -r dev dir _; do

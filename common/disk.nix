@@ -13,6 +13,9 @@
   cmdline ? "quiet",
   # boot the bootstrap on UEFI as a UKI that Limine chainloads
   uki ? false,
+  # the UKI is the EFI boot file itself, no Limine: one hop less on a
+  # UEFI-only platform
+  efiDirect ? false,
   ukiKernel ? kernel,
 }:
 let
@@ -54,6 +57,7 @@ in
 # target kernel + initrd), partition 2 holds Limine's BIOS stage 2. The rest
 # of the disk stays unpartitioned for the bootstrap to lay out. UEFI-only
 # platforms keep partition 2 empty, so the system is partition 3 everywhere.
+assert lib.assertMsg (!efiDirect || uki) "efiDirect needs uki";
 runCommand "spore-disk"
   {
     nativeBuildInputs = [
@@ -91,8 +95,13 @@ runCommand "spore-disk"
       # (log_wait in src/boot/efi-log.c).
       mmd -i esp.img ::/loader
     ''}
-    mcopy -i esp.img ${limineConf} ::/limine.conf
-    mcopy -i esp.img ${limine}/share/limine/BOOT${lib.toUpper efiArch}.EFI ::/EFI/BOOT/BOOT${lib.toUpper efiArch}.EFI
+    ${lib.optionalString (!efiDirect) ''
+      mcopy -i esp.img ${limineConf} ::/limine.conf
+      mcopy -i esp.img ${limine}/share/limine/BOOT${lib.toUpper efiArch}.EFI ::/EFI/BOOT/BOOT${lib.toUpper efiArch}.EFI
+    ''}
+    ${lib.optionalString efiDirect ''
+      mcopy -i esp.img ${ukiImage}/spore.efi ::/EFI/BOOT/BOOT${lib.toUpper efiArch}.EFI
+    ''}
     ${lib.optionalString isx86 ''
       mcopy -i esp.img ${limine}/share/limine/limine-bios.sys ::/limine-bios.sys
     ''}

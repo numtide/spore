@@ -225,7 +225,7 @@ let
       tries "3 3"
       boot second.log
       show second.log
-      need '^spore: kexec into the target on the ESP after .* s: 2 of 3 tries left' second.log
+      need '^spore: kexec into the target on the ESP after .*: 2 of 3 tries left' second.log
       need 'boot good: 3 of 3 tries left' second.log
       need SPORE-TARGET-OK second.log
       if grep -q '^spore: network up' second.log; then
@@ -247,7 +247,7 @@ let
       tries "1 2"
       boot second.log
       show second.log
-      need '^spore: kexec into the target on the ESP after .* s: 0 of 2 tries left' second.log
+      need '^spore: kexec into the target on the ESP after .*: 0 of 2 tries left' second.log
       need 'Kernel panic' second.log
       tries "0 2"
       boot third.log

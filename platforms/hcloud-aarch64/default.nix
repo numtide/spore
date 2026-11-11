@@ -24,9 +24,10 @@ rec {
     inherit userdataUrl;
     debug = true;
   };
+  # mem=2G: see platforms/aws-aarch64/default.nix
   linuxDisk = common.disk {
     inherit kernel initrd;
-    cmdline = "quiet";
+    cmdline = "quiet mem=2G";
   };
   ukiDisk = linuxDisk.override {
     uki = true;
@@ -39,8 +40,7 @@ rec {
     (pkgs.nixos {
       imports = [ ../../targets/hcloud ];
       boot.kernelPackages = pkgs.linuxPackagesFor kernel;
-      # the kernel has no softdog yet: its kernel.config needs a native build
-      spore.bootGood.deadline = null;
+      spore.bootGood.stamp = common.spore;
     }).config.system.build.toplevel;
   # TCG: the arm builders have no /dev/kvm
   test = {

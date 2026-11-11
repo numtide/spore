@@ -43,7 +43,7 @@ use store::path::StorePath;
 use userdata::{Fallback, UserData};
 
 const ROOT: &str = "/mnt";
-const JOBS: usize = 32;
+const JOBS: usize = 96;
 
 fn mount(src: &str, dst: &str, fstype: &str) -> Result<(), String> {
     let _ = fs::create_dir_all(dst);
@@ -92,6 +92,10 @@ fn early_init() {
         }
     }
     unsafe { std::env::set_var("PATH", "/bin") };
+    // the fetch writes a few hundred MiB, and the default writeback threshold (10 %
+    // of RAM) leaves most of it to the sync before the kexec; from 16 MiB on it
+    // overlaps the download
+    let _ = fs::write("/proc/sys/vm/dirty_background_bytes", "16777216");
 }
 
 /// The CPU counter (TSC, CNTVCT). KVM starts it at 0 with the VM, so its value
@@ -107,11 +111,46 @@ fn counter() -> u64 {
     }
 }
 
-/// `c0` is the counter at the start of /init. The rate comes from the counter and the
-/// monotonic clock since then, so the start costs no calibration time.
-fn log_reset(t0: Instant, c0: u64) {
-    let rate = (counter() - c0) as f64 / t0.elapsed().as_secs_f64();
-    log!("started {:.2} s after the reset", c0 as f64 / rate);
+/// Seconds from the reset to the start of /init (`c0` is the counter then) and to now,
+/// and the counter rate, taken from the counter and the monotonic clock since the
+/// start: no calibration at the start.
+fn since_reset(t0: Instant, c0: u64) -> (f64, f64, f64) {
+    let c = counter();
+    let rate = (c - c0) as f64 / t0.elapsed().as_secs_f64();
+    (c0 as f64 / rate, c as f64 / rate, rate)
+}
+
+/// Hz. x86 has no architected TSC rate, so there it comes from the bootstrap log on
+/// the target.
+fn counter_rate() -> Option<f64> {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let f: u64;
+        unsafe { core::arch::asm!("mrs {}, cntfrq_el0", out(reg) f) };
+        if f > 0 {
+            return Some(f as f64);
+        }
+    }
+    rate_from_log(&fs::read_to_string("/var/log/spore.log").ok()?)
+}
+
+fn rate_from_log(log: &str) -> Option<f64> {
+    log.lines().find_map(|l| {
+        l.split("counter rate ")
+            .nth(1)?
+            .split(' ')
+            .next()?
+            .parse()
+            .ok()
+    })
+}
+
+/// (user, system) CPU seconds of this process so far.
+fn cpu_seconds() -> (f64, f64) {
+    let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) };
+    let f = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 / 1e6;
+    (f(ru.ru_utime), f(ru.ru_stime))
 }
 
 /// The peak resident set of this process (VmHWM) in MiB.
@@ -140,14 +179,9 @@ fn emergency() -> ! {
     }
 }
 
-/// Resolves `path` inside `root` as if `root` were `/`, following symlinks.
-fn resolve_in(root: &Path, path: &str) -> Result<PathBuf, String> {
-    let logical = resolve_with(root, path, &mut |_| Ok(()))?;
-    Ok(root.join(logical.strip_prefix("/").unwrap()))
-}
-
-/// Like resolve_in, but returns the path as seen from inside `root`, and calls `visit`
-/// on each path before it looks at it.
+/// Resolves `path` inside `root` as if `root` were `/`, following symlinks; returns
+/// the path as seen from inside `root`, and calls `visit` on each path before it looks
+/// at it.
 fn resolve_with(
     root: &Path,
     path: &str,
@@ -210,21 +244,60 @@ fn args() -> Args {
 
 fn fetch_userdata(url: &str) -> Result<String, String> {
     let mut last = String::new();
-    for _ in 0..10 {
-        match ureq::get(url).timeout(Duration::from_secs(5)).call() {
-            Ok(r) => {
-                let mut s = String::new();
-                r.into_reader()
-                    .take(1 << 20)
-                    .read_to_string(&mut s)
-                    .map_err(|e| format!("{url}: {e}"))?;
-                return Ok(s);
+    let mut wait = Duration::from_millis(50);
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_secs(30) {
+        match get_userdata(url) {
+            Ok(s) => return Ok(s),
+            Err(e) => {
+                if last.is_empty() {
+                    log!("user-data: {e}; retrying");
+                }
+                last = format!("{url}: {e}");
             }
-            Err(e) => last = format!("{url}: {e}"),
         }
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(wait);
+        wait = (wait * 2).min(Duration::from_secs(2));
     }
     Err(last)
+}
+
+fn get_userdata(url: &str) -> Result<String, String> {
+    let t = Duration::from_secs(5);
+    let r = match imds(url) {
+        Some((token_url, data_url)) => {
+            let token = ureq::put(&token_url)
+                .set("X-aws-ec2-metadata-token-ttl-seconds", "60")
+                .timeout(t)
+                .call()
+                .map_err(|e| format!("token: {e}"))?
+                .into_string()
+                .map_err(|e| format!("token: {e}"))?;
+            ureq::get(&data_url)
+                .set("X-aws-ec2-metadata-token", token.trim())
+                .timeout(t)
+                .call()
+        }
+        None => ureq::get(url).timeout(t).call(),
+    }
+    .map_err(|e| e.to_string())?;
+    let mut s = String::new();
+    r.into_reader()
+        .take(1 << 20)
+        .read_to_string(&mut s)
+        .map_err(|e| e.to_string())?;
+    Ok(s)
+}
+
+/// The token and data URLs of an `imdsv2://HOST/PATH` URL: the EC2 metadata service
+/// wants a session token first.
+fn imds(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix("imdsv2://")?;
+    let (host, path) = rest.split_once('/')?;
+    Some((
+        format!("http://{host}/latest/api/token"),
+        format!("http://{host}/{path}"),
+    ))
 }
 
 fn link(target: &str, at: &Path) -> Result<(), String> {
@@ -290,7 +363,12 @@ fn target_layout(
 
 /// Pulls the closure of `system` into `root` and registers it. Returns the number of
 /// paths added and their NAR bytes.
-fn pull(root: &Path, system: &StorePath, f: &fetch::Fetcher) -> Result<(usize, u64), String> {
+fn pull(
+    root: &Path,
+    roots: &[StorePath],
+    f: &fetch::Fetcher,
+    done: &(dyn Fn(&StorePath) + Sync),
+) -> Result<(usize, u64), String> {
     let mut db = db::open(root)?;
     let valid: HashSet<String> = {
         let mut q = db
@@ -301,9 +379,70 @@ fn pull(root: &Path, system: &StorePath, f: &fetch::Fetcher) -> Result<(usize, u
             .collect::<Result<_, _>>()
             .map_err(|e| e.to_string())?
     };
-    let (infos, bytes) = f.pull(std::slice::from_ref(system), &valid, JOBS)?;
+    let (infos, bytes) = f.pull(roots, &valid, JOBS, done)?;
     db::register(&mut db, &infos)?;
     Ok((infos.len(), bytes))
+}
+
+fn closure_list(f: &fetch::Fetcher, closure: &str, ram: &Path) -> Result<Vec<StorePath>, String> {
+    let sp = StorePath::parse(closure).map_err(|e| e.0)?;
+    let dir = ram.join(closure.trim_start_matches('/'));
+    if !dir.exists() {
+        f.fetch_one(&sp, &ram.join("nix/store"))?;
+    }
+    let list = fs::read_to_string(dir.join("store-paths"))
+        .map_err(|e| format!("{}/store-paths: {e}", closure))?;
+    list.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(|l| StorePath::parse(l).map_err(|e| e.0))
+        .collect()
+}
+
+/// The store path behind the `name` link of the system at `top`, and where that file
+/// is under `root`; None when the system has no such link.
+fn boot_file(top: &Path, root: &Path, name: &str) -> Result<Option<(StorePath, PathBuf)>, String> {
+    let target = match fs::read_link(top.join(name)) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", top.join(name).display())),
+    };
+    let rel = target.strip_prefix("/nix/store").map_err(|_| {
+        format!(
+            "{name} of the system points outside the store: {}",
+            target.display()
+        )
+    })?;
+    let base = rel
+        .components()
+        .next()
+        .ok_or("empty store path")?
+        .as_os_str()
+        .to_string_lossy()
+        .into_owned();
+    let sp = StorePath::from_base_name(&base).map_err(|e| e.0)?;
+    Ok(Some((
+        sp,
+        root.join(target.strip_prefix("/").unwrap_or(&target)),
+    )))
+}
+
+/// For a target without an initrd. PARTLABEL rather than the device: NVMe disks
+/// renumber between boots.
+fn root_cmdline(layout: &Layout, mounts: &[(String, PathBuf)]) -> String {
+    let p = layout
+        .partitions
+        .iter()
+        .find(|p| p.mount.as_deref() == Some("/"));
+    let dev = match p.and_then(|p| p.label.as_deref()) {
+        Some(l) => format!("PARTLABEL={l}"),
+        None => mounts
+            .first()
+            .map(|(_, d)| d.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    };
+    let fstype = p.and_then(|p| p.format.as_deref()).unwrap_or("ext4");
+    format!("root={dev} rootfstype={fstype} rw rootwait")
 }
 
 /// `init=` and the target's kernel-params. A panic resets the machine, so the next
@@ -347,13 +486,23 @@ fn boot_target(t0: Instant, c0: u64) -> Result<Option<Tries>, String> {
     };
     let out = Path::new("/run/spore/target");
     fs::create_dir_all(out).map_err(|e| e.to_string())?;
-    let cmdline = esp.read_target(out).map_err(err)?;
+    let t = Instant::now();
+    let (cmdline, has_initrd) = esp.read_target(out).map_err(err)?;
     let left = tries.left - 1;
     esp.set_tries(Tries { left, ..tries }).map_err(err)?;
-    kexec::load(&out.join("kernel"), &out.join("initrd"), &cmdline)?;
-    log_reset(t0, c0);
+    log!("target read from the ESP in {} ms", t.elapsed().as_millis());
+    let t = Instant::now();
+    let initrd = out.join("initrd");
+    kexec::load(
+        &out.join("kernel"),
+        has_initrd.then_some(initrd.as_path()),
+        &cmdline,
+    )?;
+    log!("kexec loaded in {} ms", t.elapsed().as_millis());
+    let (start, now, _) = since_reset(t0, c0);
+    log!("started {start:.2} s after the reset");
     log!(
-        "kexec into the target on the ESP after {} s: {left} of {} tries left",
+        "kexec into the target on the ESP after {} s (reset+{now:.2} s): {left} of {} tries left",
         s(),
         tries.total
     );
@@ -381,6 +530,7 @@ fn run(t0: Instant, c0: u64, a: &Args, net_up: &mut bool, failed: bool) -> Resul
             .map_err(|_| "no user-data URL for this platform")?,
     };
     let ud = UserData::parse(&fetch_userdata(&url)?)?;
+    log!("user-data read after {} s", s());
     if failed && ud.fallback == Fallback::Rescue {
         log!("rescue: the user-data asks for it; the disk stays as it is");
         emergency();
@@ -420,9 +570,74 @@ fn run(t0: Instant, c0: u64, a: &Args, net_up: &mut bool, failed: bool) -> Resul
         log!("not mounting {m}: no ext4 on it");
     }
 
-    let (n, bytes) = pull(root, &system, &f)?;
+    let sys = system.to_string();
+    let ram = Path::new("/run/spore");
+    let top = ram.join(sys.trim_start_matches('/'));
+    if !top.exists() {
+        f.fetch_one(&system, &ram.join("nix/store"))?;
+    }
+    let (kernel_path, kernel) =
+        boot_file(&top, root, "kernel")?.ok_or("the system has no kernel")?;
+    let (initrd_path, initrd) = boot_file(&top, root, "initrd")?.unzip();
+    // the kernel and the initrd head the queue: the ESP takes them while the rest
+    // downloads
+    let mut roots = vec![kernel_path];
+    roots.extend(initrd_path);
+    let need = std::sync::Mutex::new(roots.iter().cloned().collect::<HashSet<_>>());
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let landed = move |p: &StorePath| {
+        let mut n = need.lock().unwrap();
+        if n.remove(p) && n.is_empty() {
+            log!("kernel and initrd fetched after {} s", s());
+            let _ = tx.send(());
+        }
+    };
+
+    let mut params = fs::read_to_string(top.join("kernel-params")).unwrap_or_default();
+    if initrd.is_none() {
+        params = format!("{} {params}", root_cmdline(&layout, &prep.mounts));
+    }
+    let cmdline = target_cmdline(&sys, &params);
+    let writer = {
+        let (esp, kernel, initrd, cmdline) = (
+            prep.esp.clone(),
+            kernel.clone(),
+            initrd.clone(),
+            cmdline.clone(),
+        );
+        std::thread::spawn(move || -> Result<(u64, u128), String> {
+            rx.recv()
+                .map_err(|_| "the fetch ended before the kernel landed".to_string())?;
+            let t = Instant::now();
+            esp::Esp::open(&esp)?
+                .write_target_files(&esp::Target {
+                    kernel: &kernel,
+                    initrd: initrd.as_deref(),
+                    cmdline: &cmdline,
+                })
+                .map_err(|e| format!("ESP {}: {e}", esp.display()))?;
+            let size = |p: &Path| fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            let mib = (size(&kernel) + initrd.as_deref().map(size).unwrap_or(0)) >> 20;
+            Ok((mib, t.elapsed().as_millis()))
+        })
+    };
+
+    // with the closure list every narinfo is asked for at once; the reference graph
+    // of a NixOS system is 7 levels deep, one round trip each otherwise
+    roots.push(system.clone());
+    if let Some(c) = &ud.closure {
+        let t = Instant::now();
+        roots.extend(closure_list(&f, c, ram)?);
+        log!(
+            "closure list: {} paths, read in {} ms",
+            roots.len() - 1,
+            t.elapsed().as_millis()
+        );
+    }
+    let (n, bytes) = pull(root, &roots, &f, &landed)?;
+    let (user, sys_cpu) = cpu_seconds();
     log!(
-        "fetched {system} after {} s: {} paths, {} MiB",
+        "fetched {system} after {} s: {} paths, {} MiB; cpu user {user:.2} s, sys {sys_cpu:.2} s",
         s(),
         n,
         bytes >> 20
@@ -430,45 +645,44 @@ fn run(t0: Instant, c0: u64, a: &Args, net_up: &mut bool, failed: bool) -> Resul
 
     let profiles = root.join("nix/var/nix/profiles");
     fs::create_dir_all(&profiles).map_err(|e| e.to_string())?;
-    link(&system.to_string(), &profiles.join("system-1-link"))?;
+    link(&sys, &profiles.join("system-1-link"))?;
     link("system-1-link", &profiles.join("system"))?;
 
-    let sys = system.to_string();
-    let kernel = resolve_in(root, &format!("{sys}/kernel"))?;
-    let initrd = resolve_in(root, &format!("{sys}/initrd"))?;
-    let params =
-        fs::read_to_string(resolve_in(root, &format!("{sys}/kernel-params"))?).unwrap_or_default();
-    let cmdline = target_cmdline(&sys, &params);
+    let (mib, ms) = writer.join().map_err(|_| "the ESP writer panicked")??;
     let total = ud.boot_tries;
     esp::Esp::open(&prep.esp)?
-        .write_target(
-            &esp::Target {
-                kernel: &kernel,
-                initrd: &initrd,
-                cmdline: &cmdline,
-            },
-            Tries {
-                left: total - 1,
-                total,
-            },
-        )
+        .set_tries(Tries {
+            left: total - 1,
+            total,
+        })
         .map_err(|e| format!("ESP {}: {e}", prep.esp.display()))?;
-    log!("boot entry written after {} s: {total} tries", s());
-
-    kexec::load(&kernel, &initrd, &cmdline)?;
-    log_reset(t0, c0);
     log!(
-        "kexec into {system} after {} s, peak memory {:.1} MiB",
+        "boot entry written after {} s: {total} tries, {mib} MiB in {ms} ms alongside the fetch",
+        s()
+    );
+
+    let t = Instant::now();
+    kexec::load(&kernel, initrd.as_deref(), &cmdline)?;
+    log!("kexec loaded in {} ms", t.elapsed().as_millis());
+    let (start, now, rate) = since_reset(t0, c0);
+    log!("started {start:.2} s after the reset; counter rate {rate:.0} Hz");
+    log!(
+        "kexec into {system} after {} s (reset+{now:.2} s), peak memory {:.1} MiB",
         s(),
         peak_mib()
     );
     // the console is gone after kexec; keep the timings on the target
     let _ = fs::create_dir_all(root.join("var/log"));
     let _ = fs::write(root.join("var/log/spore.log"), &*LOG.lock().unwrap());
+    let t = Instant::now();
     unsafe { libc::sync() };
     for (m, _) in prep.mounts.iter().rev() {
         umount(&format!("{ROOT}{}", m.trim_end_matches('/')));
     }
+    println!(
+        "spore: synced and unmounted in {} ms",
+        t.elapsed().as_millis()
+    );
     Err(kexec::exec())
 }
 
@@ -484,7 +698,8 @@ fn main() {
             .and_then(|s| UserData::parse(&s))
             .and_then(|ud| {
                 let (system, f) = fetcher(&ud, Path::new(root))?;
-                pull(Path::new(root), &system, &f).map(|(n, b)| (system, n, b))
+                pull(Path::new(root), std::slice::from_ref(&system), &f, &|_| {})
+                    .map(|(n, b)| (system, n, b))
             });
         match r {
             Ok((system, n, bytes)) => log!(
@@ -494,6 +709,16 @@ fn main() {
             ),
             Err(e) => {
                 log!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if argv.get(1).map(String::as_str) == Some("stamp") {
+        match counter_rate() {
+            Some(rate) => println!("reset+{:.2} s", counter() as f64 / rate),
+            None => {
+                eprintln!("spore stamp: no counter rate");
                 std::process::exit(1);
             }
         }
@@ -541,6 +766,29 @@ fn main() {
 mod tests {
     use super::*;
 
+    fn resolve_in(root: &Path, path: &str) -> Result<PathBuf, String> {
+        let logical = resolve_with(root, path, &mut |_| Ok(()))?;
+        Ok(root.join(logical.strip_prefix("/").unwrap()))
+    }
+
+    #[test]
+    fn root_by_label_for_a_target_without_initrd() {
+        assert_eq!(
+            root_cmdline(&Layout::default_convention(), &[]),
+            "root=PARTLABEL=nixos rootfstype=ext4 rw rootwait"
+        );
+    }
+
+    #[test]
+    fn rate_from_the_log() {
+        let log = "spore: fetched x after 1 s\nspore: started 1.20 s after the reset; counter rate 1050000000 Hz\n";
+        assert_eq!(rate_from_log(log), Some(1.05e9));
+        assert_eq!(
+            rate_from_log("spore: started 1.20 s after the reset\n"),
+            None
+        );
+    }
+
     #[test]
     fn cmdline_resets_on_panic() {
         assert_eq!(
@@ -570,5 +818,23 @@ mod tests {
         std::os::unix::fs::symlink("loop", root.join("loop")).unwrap();
         assert!(resolve_in(&root, "/loop").is_err());
         fs::remove_dir_all(&root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod imds_tests {
+    use super::imds;
+
+    #[test]
+    fn imds_urls() {
+        assert_eq!(
+            imds("imdsv2://169.254.169.254/latest/user-data"),
+            Some((
+                "http://169.254.169.254/latest/api/token".to_string(),
+                "http://169.254.169.254/latest/user-data".to_string()
+            ))
+        );
+        assert_eq!(imds("http://169.254.169.254/hetzner/v1/userdata"), None);
+        assert_eq!(imds("imdsv2://host-only"), None);
     }
 }

@@ -19,6 +19,8 @@ let
   arch = stdenv.hostPlatform.linuxArch;
   flags = f: lib.concatMapStringsSep " " (o: "--${f} ${o}");
   wanted = lib.subtractLists (base.disable ++ fragment.disable) (base.enable ++ fragment.enable);
+  set = fragment.set or { };
+  setFlags = lib.concatStrings (lib.mapAttrsToList (n: v: " --set-val ${n} ${v}") set);
 in
 stdenv.mkDerivation {
   name = "${name}-kernel-config";
@@ -33,11 +35,16 @@ stdenv.mkDerivation {
     patchShebangs scripts/config
     make ARCH=${arch} ${toString defconfigs}
     scripts/config ${flags "enable" base.enable} ${flags "disable" base.disable} \
-      ${flags "enable" fragment.enable} ${flags "disable" fragment.disable}
+      ${flags "enable" fragment.enable} ${flags "disable" fragment.disable}${setFlags}
     make ARCH=${arch} olddefconfig
     for o in ${toString wanted}; do
       grep -q "^CONFIG_$o=y" .config || echo "not set: $o"
     done > missing
+    ${lib.concatStrings (
+      lib.mapAttrsToList (n: v: ''
+        grep -q '^CONFIG_${n}=${v}$' .config || echo "not ${v}: ${n}" >> missing
+      '') set
+    )}
     if [ -s missing ]; then cat missing >&2; exit 1; fi
   '';
   installPhase = "cp .config $out";

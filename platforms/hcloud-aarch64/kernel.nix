@@ -6,6 +6,14 @@
   enable = [
     "ACPI"
     "ACPI_BUTTON"
+    # Ampere Altra is Neoverse-N1: "(rare)" errata that defconfig leaves
+    # out, applied by MIDR at runtime
+    "ARM64_ERRATUM_1542419"
+    "ARM64_ERRATUM_1286807"
+    # a builder wants throughput; defconfig picks full preemption
+    "PREEMPT_NONE"
+    "SOFTLOCKUP_DETECTOR"
+    "DETECT_HUNG_TASK"
     "ARM_PSCI_FW"
     # kexec parks the secondary CPUs through CPU hotplug, which arm64 only
     # offers with PM_SLEEP_SMP
@@ -50,8 +58,14 @@
     "SERIAL_8250_PCI"
     "SERIAL_AMBA_PL011"
     "SERIAL_AMBA_PL011_CONSOLE"
+    # targets/boot-good.nix arms it at boot
+    "WATCHDOG"
+    "WATCHDOG_CORE"
+    "WATCHDOG_SYSFS"
+    "SOFT_WATCHDOG"
   ];
   disable = [
+    "PREEMPT"
     # virtio-gpu would take the console from efifb and needs DRM
     "DRM"
     # efifb binds efi-framebuffer; SYSFB_SIMPLEFB would turn it into
@@ -67,7 +81,6 @@
     "ATA"
     "ETHERNET"
     "PHYLIB"
-    "WATCHDOG"
     "HWMON"
     "CPU_FREQ"
     "XEN"
@@ -89,4 +102,7 @@
     "INTERCONNECT"
     "ARM_SCMI_PROTOCOL"
   ];
+  set = {
+    LOG_BUF_SHIFT = "20";
+  };
 }
