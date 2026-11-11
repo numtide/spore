@@ -38,6 +38,24 @@ rec {
   target =
     (pkgs.nixos {
       imports = [ ../../targets/aws ];
+      # systemd brings util-linux-minimal; the getty, fsck and activation
+      # units named the full one next to it, 28 MiB more in the closure
+      nixpkgs.pkgs = pkgs.extend (
+        _: prev: {
+          # the same build as util-linuxMinimal (whose definition goes through
+          # the final util-linux and would recurse)
+          util-linux = prev.util-linux.override {
+            cryptsetupSupport = false;
+            nlsSupport = false;
+            ncursesSupport = false;
+            pamSupport = false;
+            shadowSupport = false;
+            systemdSupport = false;
+            translateManpages = false;
+            withLastlog = false;
+          };
+        }
+      );
       boot.kernelPackages = pkgs.linuxPackagesFor kernel;
       spore.bootGood.stamp = common.spore;
     }).config.system.build.toplevel;

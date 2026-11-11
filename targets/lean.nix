@@ -38,6 +38,10 @@
     boot.kernelParams = [
       "quiet"
       "udev.log_level=3"
+      # without /etc/machine-id, PID 1 takes the boot for the first one and
+      # populates /etc from the presets: 0.3 s for nothing, units are enabled
+      # in the store
+      "systemd.condition_first_boot=0"
       # without a configured size, PID 1 queries the console with ANSI
       # sequences that never get an answer and waits 333 ms, in the initrd and
       # again after switch-root
@@ -152,6 +156,9 @@
     services.fstrim.enable = false;
     programs.nano.enable = false;
     security.sudo.enable = false;
+    # pam_lastlog2 is the lastlog output of the full util-linux; nothing
+    # reads /var/lib/lastlog on a builder
+    security.pam.services.login.lastlog.enable = lib.mkForce false;
     system.disableInstallerTools = true;
     services.lvm.enable = false;
     boot.initrd.enable = config.spore.initrd;
