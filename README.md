@@ -62,7 +62,7 @@ A Debian cax41 with `nix-bin` from apt works as a temporary builder:
 | `kernel-config.nix`  | Resolves a .config from the fragments |
 | `kernel.nix`         | Builds a kernel from a committed .config; `zboot` adds `EFI_ZBOOT` |
 | `uki.nix`            | The UKI: ukify and systemd-stub with the kernel, initrd and cmdline |
-| `disk.nix`           | The raw GPT disk; `uki = true` boots a UKI on UEFI |
+| `disk.nix`           | The raw GPT disk; `uki = true` boots a UKI on UEFI, `efiDirect = true` makes it the EFI boot file |
 | `test.nix`           | The QEMU boot tests |
 
 `platforms/<platform>-<arch>/` holds what is different for each target. The
@@ -76,8 +76,9 @@ flake exports it as `packages.<arch>-linux.<platform>-*` and
 | `default.nix`   | The kernel, the initrds, the disks (`disk` is the release disk), the target and the test settings |
 
 `targets/boot-good.nix` is the NixOS module that marks a boot good for the
-boot counter. `targets/boot-good.sh` is its script. `targets/hcloud/` is the
-lean NixOS target of the measurements.
+boot counter. `targets/boot-good.sh` is its script. `targets/lean.nix` is
+the lean NixOS target of the measurements; `targets/hcloud/` and
+`targets/aws/` add the metadata service of the platform.
 
 The kernel of a platform is the arch defconfig and the config targets of the
 platform, then the base fragment, then the platform fragment. The platform
@@ -114,7 +115,8 @@ works on virtio-blk (`vda`), SCSI (`sda`) and NVMe (`nvme0n1`).
   passthrough mode (the metal sizes have an SMMU, the VM sizes none). virtio
   is in for the QEMU boot test only. The bootstrap loads no modules.
 - Firmware: UEFI only. The AMI is registered with `--boot-mode uefi`.
-- Release disk: `aws-disk`, the same as `aws-disk-uki`.
+- Release disk: `aws-disk`. The UKI with the zboot kernel is
+  `EFI/BOOT/BOOTAA64.EFI` itself; the disk has no Limine.
 - Console: the serial console on `ttyS0`, from the ACPI SPCR table.
 - User-data: `imdsv2://169.254.169.254/latest/user-data`. The bootstrap
   takes a session token (`PUT /latest/api/token`) and sends it with the
@@ -134,11 +136,12 @@ Later platforms: GCE (gVNIC, virtio-scsi, the `Metadata-Flavor` header,
 The disk is 131 MiB. The rest of the server disk stays free for the
 bootstrap. The system is on partition 3 on both arches.
 
-Limine is the boot manager on BIOS and UEFI, on x86_64 and aarch64. It
-starts only `/bootstrap`. On a UKI disk, `/bootstrap` is an `efi` entry for
+Limine is the boot manager of the hcloud disks, on BIOS and UEFI. It starts
+only `/bootstrap`. On a UKI disk, `/bootstrap` is an `efi` entry for
 `/bootstrap.efi`. The x86_64 UKI disk also has `/bootstrap-bios`, a linux
 entry, because Limine hides `efi` entries on BIOS and starts the first entry
-it can boot.
+it can boot. The AWS disk has no Limine: the firmware starts the UKI as the
+EFI boot file.
 
 The bootstrap keeps the target in the `target/` directory of the ESP:
 `kernel`, `initrd`, `cmdline` and the boot counter `tries`.
@@ -192,10 +195,11 @@ partition of the layout, and the kernel mounts the root itself.
    partitions as ext4.
 1. It copies the closure of the system from the first substituter that has
    each path. The narinfo must have a signature by a trusted key. The NAR
-   hash and size are checked on the stream.
+   hash and size are checked on the stream. The kernel and the initrd come
+   first: the ESP takes them, with the command line, while the rest
+   downloads.
 1. It registers the paths in the Nix database and sets the system profile.
-1. It copies the kernel, the initrd and the command line of the system to
-   the ESP, with the boot counter. The first boot takes one try.
+1. It writes the boot counter to the ESP. The first boot takes one try.
 1. It writes its log to `/var/log/spore.log` on the target and starts the
    system with kexec.
 
@@ -219,7 +223,7 @@ is no Rust mkfs.ext4.
 | Module     | Content |
 | ---------- | ------- |
 | `net`      | DHCP client. Adds a host route to a gateway outside the subnet (hcloud leases a /32). |
-| `fetch`    | Signed narinfo, 32 parallel downloads, xz and zstd, NarHash and NarSize checked on the stream |
+| `fetch`    | Signed narinfo, 96 parallel downloads, xz and zstd, NarHash and NarSize checked on the stream |
 | `store`    | NAR restore with canonical metadata, through one 256 KiB window per download; copied from iets `src/store` (relicensed under MIT) |
 | `db`       | Registers the paths in the Nix database (schema 10) |
 | `repart`, `disk`, `gpt` | The partition layout and the GPT editor |
@@ -228,7 +232,8 @@ is no Rust mkfs.ext4.
 
 It logs each step with the time since /init started, the disk step with its
 sub-steps in milliseconds, the time from the reset to /init (from the CPU
-counter), and its peak memory before the kexec.
+counter), and its peak memory before the kexec. `spore stamp` on the target
+prints the time since the reset on the same clock.
 
 `spore pull ROOT USERDATA.json` runs only the fetch and the registration
 into `ROOT`. Use it to test a cache from any Linux host.
@@ -244,13 +249,13 @@ bootstrap.
 The bootstrap counts the boots of the target. After `boot-tries` boots
 without a good mark, the machine falls back to the bootstrap.
 
-Limine starts `/bootstrap` on every boot. The bootstrap reads `target/tries`
-on the ESP. The file holds "LEFT TOTAL".
+The bootstrap runs on every boot. It reads `target/tries` on the ESP. The
+file holds "LEFT TOTAL".
 
 - LEFT is more than 0: the bootstrap writes LEFT − 1 and syncs. Then it
-  copies `target/kernel` and `target/initrd` to RAM and kexecs them with
-  `target/cmdline`. This path uses no network, mounts nothing and writes no
-  log file.
+  copies `target/kernel` and `target/initrd`, if there is one, to RAM and
+  kexecs them with `target/cmdline`. This path uses no network, mounts
+  nothing and writes no log file.
 - LEFT is 0: the bootstrap reads the user-data. With `"fallback":
   "provision"`, it provisions again, as on the first boot. It keeps the
   partitions, fetches only the missing paths, writes the target files again
@@ -271,7 +276,7 @@ writes "TOTAL TOTAL" to `target/tries`. It writes through the mount when the
 target mounts the ESP. Otherwise it uses mtools on the raw partition. A
 health check makes itself part of the good mark with
 `requiredBy = [ "boot-complete.target" ]` and
-`before = [ "boot-complete.target" ]`. `targets/hcloud` imports the module.
+`before = [ "boot-complete.target" ]`. `targets/lean.nix` imports the module.
 
 A target without the module never gives tries back. The bootstrap still
 counts its boots and falls back after `boot-tries` boots, also when these
@@ -428,10 +433,10 @@ spot instance from the AMI, collects the timings of the first boot and of
 a warm reboot (the bootstrap log, `systemd-analyze`, dmesg, the serial
 console, the good line) into `OUTDIR` and terminates it. It needs AWS
 credentials and `SPORE_SUBNET`, `SPORE_SG`, `SPORE_KEY` in the
-environment. Every time in the bootstrap log is seconds since `/init`;
-the `reset+` times and `spore stamp` on the target count from the reset
-of the machine instead, so one clock covers firmware, bootstrap and
-target.
+environment; its header lists the optional variables. Every time in the
+bootstrap log is seconds since `/init`. The `reset+` times and
+`spore stamp` on the target count from the reset of the machine, so one
+clock covers firmware, bootstrap and target.
 
 ## Lean targets
 
@@ -439,22 +444,22 @@ target.
 platform directories under `targets/` add the metadata service of the
 platform: the root ssh keys and the host name. The flake exports it as
 `packages.<arch>-linux.<platform>-target`. It boots the kernel of its
-platform, which has every driver built in, so the target initrd loads
-no modules. It has a slim systemd, nix without ICU or AWS, sshd without PAM,
-no setuid wrappers, and a short package list. It gets the root ssh keys from
-the metadata service. The bootstrap owns the disk layout, so the target has
-no growpart or repart. It imports `targets/boot-good.nix`.
+platform, which has every driver built in, so the target initrd loads no
+modules. It has a slim systemd, nix without ICU or AWS, sshd without PAM,
+no setuid wrappers, and a short package list. The bootstrap owns the disk
+layout, so the target has no growpart or repart. It imports
+`targets/boot-good.nix`.
 
-`spore.initrd = false` drops the initrd: the bootstrap then passes
-`root=PARTLABEL=<label>` and the kernel mounts the root itself, stage 2
-runs the activation script and starts systemd once. The AWS target boots
-this way: multi-user in 2.0 s instead of 2.9 s on a t4g.small, 18 MiB
-less to fetch, and `kexec_file_load` takes 6 ms instead of 220 ms. The
-lean target also passes `systemd.condition_first_boot=0`, because PID 1
-takes a boot without `/etc/machine-id` for the first one and spends 0.3 s
-populating `/etc` from presets that enable nothing the store does not. The
-AWS target builds its NixOS with `util-linux` overridden to the minimal
-build that systemd already brings, 28 MiB less in the closure.
+`spore.initrd = false` drops the initrd. The bootstrap then passes
+`root=PARTLABEL=<label>`, the kernel mounts the root itself, and stage 2
+starts systemd once. The AWS target boots this way: multi-user in 2.0 s
+instead of 2.9 s on a t4g.small, 18 MiB less to fetch, and
+`kexec_file_load` takes 6 ms instead of 220 ms. The lean target passes
+`systemd.condition_first_boot=0`: without `/etc/machine-id`, PID 1 takes
+every boot for the first one and spends 0.3 s on presets that enable
+nothing the store does not. The AWS target builds its NixOS with
+`util-linux` overridden to the minimal build that systemd already brings,
+28 MiB less in the closure.
 
 ## Design notes
 
@@ -613,20 +618,25 @@ and `/dev/kvm` is there. The firmware of a metal host takes minutes
 before the kernel, on a launch and on every reboot, and is not in these
 numbers.
 
-Before this round of measurements the first boot was good at 10.1 s and
-the warm reboot at 4.7 s. What moved it: the ESP chunk cache no longer
-reads the blocks it overwrites (the snapshot still holds them on S3), the
-ESP is written while the closure downloads, writeback starts during the
-fetch instead of in the sync before the kexec, the target has no initrd,
-PID 1 skips the first-boot preset run, ext4 has no journal (280 ms per
-mount on a cold EBS volume, paid by the bootstrap and again by the
-target), the layout and the closure list come from the user-data, and the
-bootstrap kernel maps 2 GiB instead of the whole machine (`kexec_file_load`
-copied the linear map of the c7g.metal for 12.3 s). A gp3 volume at
-1000 MiB/s changes none of the remaining steps but the sync and the ESP
-write. The fetch is bound by the cache edge: cache.numtide.com answered
-every request from the origin during these runs, and the same 290 MiB take
-1.3 s once the edge holds them.
+Before this round the first boot was good at 10.1 s and the warm reboot at
+4.7 s. What moved it:
+
+- The ESP chunk cache does not read the blocks it overwrites; the snapshot
+  still holds them on S3.
+- The ESP is written while the closure downloads.
+- Writeback starts during the fetch, not in the sync before the kexec.
+- The target has no initrd.
+- PID 1 skips the first-boot preset run.
+- ext4 has no journal: 280 ms per mount on a cold EBS volume, paid by the
+  bootstrap and again by the target.
+- The layout and the closure list come from the user-data.
+- The bootstrap kernel maps 2 GiB instead of the whole machine;
+  `kexec_file_load` copied the linear map of the c7g.metal for 12.3 s.
+
+A gp3 volume at 1000 MiB/s changes none of the remaining steps but the sync
+and the ESP write. The fetch is bound by the cache edge: cache.numtide.com
+answered every request from the origin during these runs, and the same
+290 MiB take 1.3 s once the edge holds them.
 
 ### Boot-count fallback
 
@@ -675,7 +685,5 @@ cx23, from the same cache, 5 runs each. The time is the one that
 - The bootstrap takes a repart layout, but ext4 only, and no encryption or
   RAID.
 - Boot counting runs the bootstrap on every warm boot, which adds a kexec.
-- The aarch64 kernel has no softdog yet, so a hang there waits for a reset
-  from outside. Its kernel.config needs a native aarch64 build.
 - The ESP entry is Limine specific. No boot specification support.
 - The kexec payload is trusted through the substituter signature only.
