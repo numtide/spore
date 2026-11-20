@@ -33,6 +33,11 @@ pkgsStatic.rustPlatform.buildRustPackage {
     "-DSQLITE_DEFAULT_MEMSTATUS=0"
     "-DSQLITE_DQS=0"
   ];
+  # Both crates compile their own C sources: sqlite with the flags above, zstd with the profile in
+  # Cargo.toml. The cargo setup hook of nixpkgs asks them for the system libraries instead.
+  preBuild = ''
+    unset LIBSQLITE3_SYS_USE_PKG_CONFIG ZSTD_SYS_USE_PKG_CONFIG
+  '';
   # cargo strip = true keeps the symbol table under nixpkgs' cross build
   postInstall = "$STRIP -s $out/bin/spore";
   meta.mainProgram = "spore";
